@@ -16,9 +16,13 @@
     return {
       id: user._id,
       fullName: user.fullName,
+      firstName: user.firstName,
+      lastName: user.lastName,
       email: user.email,
       username: user.username,
       studentNumber: user.studentNumber,
+      campus: user.campus,
+      course: user.course,
       role: user.role,
       authProvider: user.authProvider,
     };
@@ -27,10 +31,12 @@
   // POST /api/auth/register  (Public) -> force Student
   async function register(req, res, next) {
     try {
-      const { fullName, email, username, studentNumber, password } = req.body;
+      const { fullName, email, username, studentNumber, password, firstName, lastName, campus, course} = req.body;
 
       // Basic validation
-      if (!fullName || !email || !username || !studentNumber || !password) {
+      const computedFullName = fullName || [String(firstName||'').trim(), String(lastName||'').trim()].filter(Boolean).join(' ').trim();
+
+      if (!computedFullName || !email || !username || !studentNumber || !password) {
         res.status(400);
         throw new Error("Missing required fields");
       }
@@ -41,6 +47,9 @@
 
       // Check duplicates
       const emailLower = String(email).toLowerCase();
+
+      // Use computedFullName when first/last are provided
+      const finalFullName = computedFullName || fullName;
 
       const existingEmail = await User.findOne({ email: emailLower });
       if (existingEmail) {
@@ -66,7 +75,11 @@
 
       // Create user (force Student role)
       const user = await User.create({
-        fullName,
+        fullName: finalFullName,
+        firstName: firstName ? String(firstName).trim() : undefined,
+        lastName: lastName ? String(lastName).trim() : undefined,
+        campus: campus ? String(campus).trim() : undefined,
+        course: course ? String(course).trim() : undefined,
         email: emailLower,
         username,
         studentNumber,
@@ -155,6 +168,9 @@
 
       const emailLower = String(email).toLowerCase();
 
+      // Use computedFullName when first/last are provided
+      const finalFullName = computedFullName || fullName;
+
       const existingEmail = await User.findOne({ email: emailLower });
       if (existingEmail) {
         res.status(409);
@@ -205,51 +221,185 @@
   // POST /api/auth/google
   async function googleAuth(req, res, next) {
     try {
-      const { googleId, email, fullName } = req.body;
+      const {
+        googleId,
+        email,
+        fullName,
+        firstName,
+        lastName,
+        username,
+        studentNumber,
+        course,
+        campus,
+      } = req.body;
 
       if (!googleId || !email) {
         res.status(400);
         throw new Error("Missing Google credentials");
       }
 
-      const emailLower = String(email).toLowerCase();
+      const emailLower = String(email).toLowerCase().trim();
 
       // Try find by googleId first, then by email (if user previously registered local)
       let user =
         (await User.findOne({ googleId })) ||
         (await User.findOne({ email: emailLower }));
 
-      // If existing local user, attach googleId + provider
-      if (user && !user.googleId) {
-        user.googleId = googleId;
-        user.authProvider = "google";
-        await user.save();
-      }
+      // Helper: detect placeholders created by old logic
+      const isPlaceholderStudentNumber = (v) =>
+        typeof v === "string" && v.toUpperCase().startsWith("GOOGLE-");
 
-      // If no user, create in MongoDB
-      if (!user) {
-        // Create a safe username fallback (because your schema requires username/studentNumber)
-        const baseUsername =
-          (emailLower.split("@")[0] || "user").replace(/[^a-z0-9_]/gi, "").toLowerCase();
+      const isPlaceholderUsername = (u, emailLower) => {
+        if (!u || typeof u !== "string") return false;
+        const base = (emailLower.split("@")[0] || "user")
+          .replace(/[^a-z0-9_]/gi, "")
+          .toLowerCase();
+        // old format: base_#### (4 digits)
+        return new RegExp(`^${base}_[0-9]{4}$`).test(u);
+      };
 
-        const uniqueUsername = `${baseUsername}_${Math.floor(1000 + Math.random() * 9000)}`;
+      // Normalize incoming fields (optional for login page, required for signup page)
+      const inFirst = (firstName || "").toString().trim();
+      const inLast = (lastName || "").toString().trim();
+      const inUser = (username || "").toString().trim();
+      const inStud = (studentNumber || "").toString().trim();
+      const inCourse = (course || "").toString().trim();
+      const inCampus = (campus || "").toString().trim();
 
-        user = await User.create({
-          fullName: fullName || "Google User",
-          email: emailLower,
-          username: uniqueUsername,
-          // your schema requires studentNumber; we need a placeholder unless you change schema
-          studentNumber: `GOOGLE-${Date.now()}`,
-          googleId,
-          authProvider: "google",
-          role: "Student",
+      // If user exists:
+      if (user) {
+        // Attach googleId if needed
+        if (!user.googleId) {
+          user.googleId = googleId;
+          user.authProvider = "google";
+        }
+
+        // If the client sent profile fields (Signup page), sync them.
+        // Only update username/studentNumber if the current values are placeholders (or empty)
+        const wantsSync = Boolean(inFirst || inLast || inUser || inStud || inCourse || inCampus);
+
+        if (wantsSync) {
+          // Validate if provided
+          if (inUser && inUser.length < 6) {
+            res.status(400);
+            throw new Error("Username must be at least 6 characters");
+          }
+          if (inStud) {
+            const studentNumberRegex = /^[0-9]{2}-[0-9]{5}$/;
+            if (!studentNumberRegex.test(inStud)) {
+              res.status(400);
+              throw new Error("Invalid student number format");
+            }
+          }
+
+          // Uniqueness checks if changing to non-placeholder
+          if (inUser && (user.username !== inUser) && (isPlaceholderUsername(user.username, emailLower) || !user.username)) {
+            const existingUsername = await User.findOne({ username: inUser, _id: { $ne: user._id } });
+            if (existingUsername) {
+              res.status(409);
+              throw new Error("Username already exists");
+            }
+            user.username = inUser;
+          }
+
+          if (inStud && (user.studentNumber !== inStud) && (isPlaceholderStudentNumber(user.studentNumber) || !user.studentNumber)) {
+            const existingStud = await User.findOne({ studentNumber: inStud, _id: { $ne: user._id } });
+            if (existingStud) {
+              res.status(409);
+              throw new Error("Student number already exists");
+            }
+            user.studentNumber = inStud;
+          }
+
+          if (inFirst && !user.firstName) user.firstName = inFirst;
+          if (inLast && !user.lastName) user.lastName = inLast;
+
+          if (inCourse && !user.course) user.course = inCourse;
+          if (inCampus && !user.campus) user.campus = inCampus;
+
+          // If we now have first + last, ensure fullName is consistent
+          const finalFullName =
+            [user.firstName, user.lastName].filter(Boolean).join(" ").trim() ||
+            user.fullName ||
+            fullName ||
+            "Google User";
+
+          user.fullName = finalFullName;
+
+          await user.save();
+        } else {
+          // no sync requested: still ensure provider/id is saved
+          await user.save();
+        }
+
+        const token = signToken(user);
+        return res.json({
+          message: "Google login successful",
+          token,
+          user: userPayload(user),
         });
       }
+
+      // If user does NOT exist: we require signup fields (Signup page)
+      // Without these, we cannot create a user (schema requires username/studentNumber).
+      if (!inFirst || !inLast || !inUser || !inStud || !inCourse) {
+        res.status(400);
+        throw new Error("Please complete signup details before using Google sign up.");
+      }
+
+      if (inUser.length < 6) {
+        res.status(400);
+        throw new Error("Username must be at least 6 characters");
+      }
+
+      const studentNumberRegex = /^[0-9]{2}-[0-9]{5}$/;
+      if (!studentNumberRegex.test(inStud)) {
+        res.status(400);
+        throw new Error("Invalid student number format");
+      }
+
+      // Check duplicates
+      const existingEmail = await User.findOne({ email: emailLower });
+      if (existingEmail) {
+        res.status(409);
+        throw new Error("Email already exists");
+      }
+
+      const existingUsername = await User.findOne({ username: inUser });
+      if (existingUsername) {
+        res.status(409);
+        throw new Error("Username already exists");
+      }
+
+      const existingStud = await User.findOne({ studentNumber: inStud });
+      if (existingStud) {
+        res.status(409);
+        throw new Error("Student number already exists");
+      }
+
+      const finalFullName =
+        [inFirst, inLast].filter(Boolean).join(" ").trim() ||
+        (fullName || "").toString().trim() ||
+        "Google User";
+
+      user = await User.create({
+        fullName: finalFullName,
+        firstName: inFirst,
+        lastName: inLast,
+        email: emailLower,
+        username: inUser,
+        studentNumber: inStud,
+        campus: inCampus || undefined,
+        course: inCourse || undefined,
+        googleId,
+        authProvider: "google",
+        role: "Student",
+      });
 
       const token = signToken(user);
 
       res.json({
-        message: "Google login successful",
+        message: "Google signup successful",
         token,
         user: userPayload(user),
       });
@@ -258,7 +408,7 @@
     }
   }
 
-  
+
   module.exports = { register, login, getMe, createUser, googleAuth };
 
   

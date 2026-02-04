@@ -9,6 +9,17 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // ✅ Separate name fields (used by Google signup + UI)
+    firstName: {
+      type: String,
+      trim: true,
+    },
+
+    lastName: {
+      type: String,
+      trim: true,
+    },
+
     email: {
       type: String,
       required: true,
