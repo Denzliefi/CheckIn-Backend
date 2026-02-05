@@ -1,31 +1,20 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
-const userSchema = new mongoose.Schema(
+const UserSchema = new mongoose.Schema(
   {
-    fullName: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+    firstName: { type: String, trim: true, maxlength: 50 },
+    lastName: { type: String, trim: true, maxlength: 50 },
 
-    // ✅ Separate name fields (used by Google signup + UI)
-    firstName: {
-      type: String,
-      trim: true,
-    },
-
-    lastName: {
-      type: String,
-      trim: true,
-    },
+    fullName: { type: String, required: true, trim: true, maxlength: 120 },
 
     email: {
       type: String,
       required: true,
       unique: true,
-      lowercase: true,
       trim: true,
+      lowercase: true,
+      maxlength: 254,
     },
 
     username: {
@@ -33,6 +22,8 @@ const userSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
+      minlength: 6,
+      maxlength: 24,
     },
 
     studentNumber: {
@@ -40,62 +31,36 @@ const userSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
+      maxlength: 32, // allow GOOGLE-xxxx fallback; still validated in controller
     },
 
-    campus: {
-      type: String,
-      trim: true,
-    },
+    course: { type: String, trim: true, maxlength: 120 },
+    campus: { type: String, trim: true, maxlength: 80 },
 
-    course: {
-      type: String,
-      trim: true,
-    },
+    googleId: { type: String, trim: true, index: true, sparse: true },
 
+    password: { type: String, select: false }, // optional for Google accounts
 
-    role: {
-      type: String,
-      enum: ["Student", "Counselor", "Admin"],
-      default: "Student",
-    },
-
-    // ✅ NEW: counselor code (only for Counselor)
-    counselorCode: {
-      type: String,
-      trim: true,
-      unique: true,
-      sparse: true, // allows many users without this field
-    },
-
-    // ✅ OPTIONAL: specialties (good for frontend filters later)
-    specialty: [
-      {
-        type: String,
-        trim: true,
-      },
-    ],
-
-    authProvider: {
-      type: String,
-      enum: ["local", "google"],
-      default: "local",
-    },
-
-    passwordHash: {
-      type: String,
-      required: function () {
-        return this.authProvider === "local";
-      },
-    },
+    role: { type: String, default: "Student" },
+    accountCreation: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
 
-// used during login
-userSchema.methods.matchPassword = async function (enteredPassword) {
-  if (!this.passwordHash) return false;
-  return bcrypt.compare(enteredPassword, this.passwordHash);
+UserSchema.pre("save", async function (next) {
+  if (!this.isModified("password")) return next();
+
+  // If password is empty/undefined (Google accounts), skip hashing
+  if (!this.password) return next();
+
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+  next();
+});
+
+UserSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password) return false;
+  return bcrypt.compare(candidatePassword, this.password);
 };
 
-module.exports = mongoose.model("User", userSchema);
-
+module.exports = mongoose.model("User", UserSchema);

@@ -15,6 +15,7 @@ const {
   register,
   login,
   googleAuth,
+  checkAvailability,
   getMe,
   createUser,
 } = require("../controllers/auth.controller");
@@ -51,6 +52,13 @@ router.post(
  * @access  Public
  */
 router.post("/google", googleAuth);
+
+/**
+ * @route   GET /api/auth/availability
+ * @desc    Check if email/username/studentNumber is available (for inline, live validation)
+ * @access  Public
+ */
+router.get("/availability", checkAvailability);
 
 /**
  * @route   GET /api/auth/me
