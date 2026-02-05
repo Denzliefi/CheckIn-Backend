@@ -31,7 +31,7 @@ const UserSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
-      maxlength: 32, // allow GOOGLE-xxxx fallback; still validated in controller
+      maxlength: 32, // allow GOOGLE-xxxx fallback
     },
 
     course: { type: String, trim: true, maxlength: 120 },
@@ -47,15 +47,16 @@ const UserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-UserSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next();
+// ✅ Promise-style hook (no next). Fixes: "next is not a function"
+UserSchema.pre("save", async function () {
+  // If password not changed, do nothing
+  if (!this.isModified("password")) return;
 
   // If password is empty/undefined (Google accounts), skip hashing
-  if (!this.password) return next();
+  if (!this.password) return;
 
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
-  next();
 });
 
 UserSchema.methods.comparePassword = async function (candidatePassword) {
