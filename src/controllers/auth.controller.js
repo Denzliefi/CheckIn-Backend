@@ -1,5 +1,8 @@
+// src/controllers/auth.controller.js
+
 const jwt = require("jsonwebtoken");
 const User = require("../models/User.model");
+
 /* =======================
    Helpers (sanitize + normalize)
 ======================= */
@@ -13,7 +16,10 @@ function stripDangerousChars(v) {
 
 function sanitizeName(v, max = 50) {
   const s = stripDangerousChars(v);
-  return s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-\s]/g, "").replace(/\s{2,}/g, " ").slice(0, max);
+  return s
+    .replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-\s]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .slice(0, max);
 }
 
 function sanitizeUsername(v, max = 24) {
@@ -28,7 +34,6 @@ function sanitizeEmail(v, max = 254) {
 
 function sanitizeStudentNumber(v) {
   const s = stripDangerousChars(v);
-  // expected format: 00-00000
   const digits = s.replace(/\D/g, "").slice(0, 7);
   if (digits.length <= 2) return digits;
   return `${digits.slice(0, 2)}-${digits.slice(2)}`.slice(0, 8);
@@ -47,7 +52,13 @@ function isValidStudentNumberFormat(v) {
 }
 
 function signToken(id) {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    // This is the most common cause of random 500s on Render
+    throw new Error("JWT_SECRET is missing in environment variables.");
+  }
+  const exp = process.env.JWT_EXPIRES_IN || "30d";
+  return jwt.sign({ id }, secret, { expiresIn: exp });
 }
 
 /* =======================
@@ -77,6 +88,7 @@ async function checkAvailability(req, res) {
 
     return res.json(response);
   } catch (err) {
+    console.error("AVAILABILITY_ERROR:", err);
     return res.status(500).json({ message: "Availability check failed." });
   }
 }
@@ -86,10 +98,10 @@ async function checkAvailability(req, res) {
 ======================= */
 async function register(req, res) {
   try {
-    // Existing validate middleware requires these fields; still sanitize here.
     const firstName = sanitizeName(req.body.firstName);
     const lastName = sanitizeName(req.body.lastName);
-    const fullName = stripDangerousChars(req.body.fullName) || [firstName, lastName].filter(Boolean).join(" ");
+    const fullName =
+      stripDangerousChars(req.body.fullName) || [firstName, lastName].filter(Boolean).join(" ");
     const email = sanitizeEmail(req.body.email);
     const username = sanitizeUsername(req.body.username);
     const studentNumber = sanitizeStudentNumber(req.body.studentNumber);
@@ -112,7 +124,6 @@ async function register(req, res) {
       return res.status(400).json({ message: "Invalid student number." });
     }
 
-    // Uniqueness checks (case-insensitive username)
     const emailExists = await User.findOne({ email }).select("_id");
     if (emailExists) return res.status(409).json({ message: "Email already exists." });
 
@@ -150,6 +161,7 @@ async function register(req, res) {
       },
     });
   } catch (err) {
+    console.error("REGISTER_ERROR:", err);
     return res.status(500).json({ message: "Signup failed." });
   }
 }
@@ -195,6 +207,7 @@ async function login(req, res) {
       },
     });
   } catch (err) {
+    console.error("LOGIN_ERROR:", err);
     return res.status(500).json({ message: "Login failed." });
   }
 }
@@ -207,6 +220,7 @@ async function getMe(req, res) {
     const user = await User.findById(req.user.id).select("-password");
     return res.json(user);
   } catch (err) {
+    console.error("GETME_ERROR:", err);
     return res.status(500).json({ message: "Failed to load user." });
   }
 }
@@ -258,39 +272,34 @@ async function createUser(req, res) {
       role: user.role,
     });
   } catch (err) {
+    console.error("ADMIN_CREATEUSER_ERROR:", err);
     return res.status(500).json({ message: "Create user failed." });
   }
 }
 
 /* =======================
    GOOGLE AUTH (SIGNUP/LOGIN)
-   POST /api/auth/google
-   Body may include: googleId, email, fullName, firstName, lastName, username, studentNumber, course
 ======================= */
 async function googleAuth(req, res) {
   try {
     const intentRaw = stripDangerousChars(req.body.intent);
-    const intent = (intentRaw || "login").toLowerCase(); // ✅ define intent
+    const intent = (intentRaw || "login").toLowerCase();
 
     const googleId = stripDangerousChars(req.body.googleId);
     const email = sanitizeEmail(req.body.email);
     const firstName = sanitizeName(req.body.firstName);
     const lastName = sanitizeName(req.body.lastName);
-    const fullName =
-      stripDangerousChars(req.body.fullName) ||
-      [firstName, lastName].filter(Boolean).join(" ");
+    const fullName = stripDangerousChars(req.body.fullName) || [firstName, lastName].filter(Boolean).join(" ");
     const usernameInput = sanitizeUsername(req.body.username);
     const studentNumberInput = sanitizeStudentNumber(req.body.studentNumber);
     const course = sanitizeCourse(req.body.course);
 
     if (!email) return res.status(400).json({ message: "Google email is required." });
 
-    // ✅ Find existing by googleId OR email
     let user = null;
     if (googleId) user = await User.findOne({ googleId }).select("-password");
     if (!user) user = await User.findOne({ email }).select("-password");
 
-    // ✅ IMPORTANT: signup can happen ONLY ONCE
     if (user && intent === "signup") {
       return res.status(409).json({
         code: "ACCOUNT_EXISTS",
@@ -298,7 +307,6 @@ async function googleAuth(req, res) {
       });
     }
 
-    // ✅ Optional but recommended: login should NOT create accounts
     if (!user && intent === "login") {
       return res.status(404).json({
         code: "ACCOUNT_NOT_FOUND",
@@ -306,9 +314,9 @@ async function googleAuth(req, res) {
       });
     }
 
-    // Helper: generate fallback username/studentNumber when not provided
     const genUsername = async () => {
-      const base = (email.split("@")[0] || "user").replace(/[^A-Za-z0-9._]/g, "").slice(0, 18) || "user";
+      const base =
+        (email.split("@")[0] || "user").replace(/[^A-Za-z0-9._]/g, "").slice(0, 18) || "user";
       let candidate = base;
       let i = 0;
       while (await User.findOne({ username: new RegExp(`^${candidate}$`, "i") }).select("_id")) {
@@ -330,7 +338,6 @@ async function googleAuth(req, res) {
       return candidate;
     };
 
-    // If user exists, update missing fields (and allow replacing placeholder values)
     if (user) {
       const updates = {};
 
@@ -340,28 +347,20 @@ async function googleAuth(req, res) {
       if (fullName && (!user.fullName || user.fullName !== fullName)) updates.fullName = fullName;
       if (course && (!user.course || user.course !== course)) updates.course = course;
 
-      // Username update only if provided and either missing or looks like placeholder
       if (usernameInput && usernameInput.length >= 6) {
-        const wantsChange = !user.username || /^user/i.test(user.username) || user.username.includes("_");
-        if (wantsChange || user.username !== usernameInput) {
-          const exists = await User.findOne({ username: new RegExp(`^${usernameInput}$`, "i") }).select("_id");
-          if (exists && String(exists._id) !== String(user._id)) {
-            return res.status(409).json({ message: "Username already exists." });
-          }
-          updates.username = usernameInput;
+        const exists = await User.findOne({ username: new RegExp(`^${usernameInput}$`, "i") }).select("_id");
+        if (exists && String(exists._id) !== String(user._id)) {
+          return res.status(409).json({ message: "Username already exists." });
         }
+        updates.username = usernameInput;
       }
 
-      // Student number update only if provided and either missing or placeholder
       if (studentNumberInput && isValidStudentNumberFormat(studentNumberInput)) {
-        const wantsChange = !user.studentNumber || String(user.studentNumber || "").startsWith("GOOGLE-");
-        if (wantsChange || user.studentNumber !== studentNumberInput) {
-          const exists = await User.findOne({ studentNumber: studentNumberInput }).select("_id");
-          if (exists && String(exists._id) !== String(user._id)) {
-            return res.status(409).json({ message: "Student number already exists." });
-          }
-          updates.studentNumber = studentNumberInput;
+        const exists = await User.findOne({ studentNumber: studentNumberInput }).select("_id");
+        if (exists && String(exists._id) !== String(user._id)) {
+          return res.status(409).json({ message: "Student number already exists." });
         }
+        updates.studentNumber = studentNumberInput;
       }
 
       if (Object.keys(updates).length) {
@@ -385,14 +384,12 @@ async function googleAuth(req, res) {
       });
     }
 
-    // If new user, decide username/studentNumber
     let username = usernameInput;
     if (!username || username.length < 6) username = await genUsername();
 
     let studentNumber = studentNumberInput;
     if (!studentNumber || !isValidStudentNumberFormat(studentNumber)) studentNumber = await genStudentNumber();
 
-    // Enforce uniqueness for provided values
     const emailExists = await User.findOne({ email }).select("_id");
     if (emailExists) return res.status(409).json({ message: "Email already exists." });
 
@@ -411,7 +408,6 @@ async function googleAuth(req, res) {
       username,
       studentNumber,
       course,
-      // password is optional for Google; schema should not require it
     });
 
     const token = signToken(newUser._id);
@@ -431,6 +427,7 @@ async function googleAuth(req, res) {
       },
     });
   } catch (err) {
+    console.error("GOOGLE_AUTH_ERROR:", err);
     return res.status(500).json({ message: "Google auth failed." });
   }
 }
