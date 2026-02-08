@@ -60,3 +60,6 @@ const server = app.listen(PORT, () => {
 server.on("error", (err) => {
   console.error("❌ LISTEN ERROR:", err);
 });
+
+const journalRoutes = require("./src/routes/journal.routes");
+app.use("/api/journal", journalRoutes);
