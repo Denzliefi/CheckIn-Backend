@@ -11,7 +11,7 @@ const connectDB = require("./src/config/db");
 const authRoutes = require("./src/routes/auth.routes");
 const counselingRoutes = require("./src/routes/counseling.routes");
 const userRoutes = require("./src/routes/user.routes");
-const journalRoutes = require("./src/routes/journal.routes"); // ✅ MOVE HERE
+const journalRoutes = require("./src/routes/journal.routes");
 
 const { notFound, errorHandler } = require("./src/middleware/errormiddleware");
 
@@ -22,10 +22,11 @@ const app = express();
 /* ======================
    MIDDLEWARE
 ====================== */
+// ✅ Put CORS here (replaces app.use(cors()))
 app.use(
   cors({
     origin: ["https://checkinauabc.vercel.app", "http://localhost:3000"],
-    credentials: false,
+    credentials: false, // using Bearer token, not cookies
     allowedHeaders: ["Content-Type", "Authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
@@ -42,15 +43,12 @@ connectDB();
 /* ======================
    ROUTES
 ====================== */
+app.get("/", (req, res) => res.json({ ok: true, message: "API running" }));
+
 app.use("/api/auth", authRoutes);
 app.use("/api/counseling", counselingRoutes);
 app.use("/api/users", userRoutes);
-app.use("/api/journal", journalRoutes); // ✅ MUST BE BEFORE notFound
-
-/* ======================
-   HEALTH CHECK
-====================== */
-app.get("/", (req, res) => res.json({ ok: true, message: "API running" }));
+app.use("/api/journal", journalRoutes); // ✅ MUST be before notFound/errorHandler
 
 /* ======================
    ERROR MIDDLEWARE (LAST)
@@ -59,7 +57,6 @@ app.use(notFound);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-
 console.log("ABOUT TO LISTEN ON PORT:", PORT);
 
 const server = app.listen(PORT, () => {
