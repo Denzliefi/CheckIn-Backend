@@ -8,11 +8,13 @@ const morgan = require("morgan");
 
 const connectDB = require("./src/config/db");
 
+// routes
 const authRoutes = require("./src/routes/auth.routes");
 const counselingRoutes = require("./src/routes/counseling.routes");
 const userRoutes = require("./src/routes/user.routes");
 const journalRoutes = require("./src/routes/journal.routes");
 
+// middleware
 const { notFound, errorHandler } = require("./src/middleware/errormiddleware");
 
 dotenv.config();
@@ -22,11 +24,11 @@ const app = express();
 /* ======================
    MIDDLEWARE
 ====================== */
-// ✅ Put CORS here (replaces app.use(cors()))
+// ✅ Vercel (frontend) ↔ Render (backend) — allow Authorization header
 app.use(
   cors({
     origin: ["https://checkinauabc.vercel.app", "http://localhost:3000"],
-    credentials: false, // using Bearer token, not cookies
+    credentials: false,
     allowedHeaders: ["Content-Type", "Authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
@@ -48,10 +50,10 @@ app.get("/", (req, res) => res.json({ ok: true, message: "API running" }));
 app.use("/api/auth", authRoutes);
 app.use("/api/counseling", counselingRoutes);
 app.use("/api/users", userRoutes);
-app.use("/api/journal", journalRoutes); // ✅ MUST be before notFound/errorHandler
+app.use("/api/journal", journalRoutes);
 
 /* ======================
-   ERROR MIDDLEWARE (LAST)
+   ERROR MIDDLEWARE (ABSOLUTELY LAST)
 ====================== */
 app.use(notFound);
 app.use(errorHandler);
