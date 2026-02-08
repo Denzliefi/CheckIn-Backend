@@ -10,7 +10,8 @@ const connectDB = require("./src/config/db");
 
 const authRoutes = require("./src/routes/auth.routes");
 const counselingRoutes = require("./src/routes/counseling.routes");
-const userRoutes = require("./src/routes/user.routes"); // ✅ ADD THIS
+const userRoutes = require("./src/routes/user.routes");
+const journalRoutes = require("./src/routes/journal.routes"); // ✅ MOVE HERE
 
 const { notFound, errorHandler } = require("./src/middleware/errormiddleware");
 
@@ -35,7 +36,8 @@ connectDB();
 ====================== */
 app.use("/api/auth", authRoutes);
 app.use("/api/counseling", counselingRoutes);
-app.use("/api/users", userRoutes); // 
+app.use("/api/users", userRoutes);
+app.use("/api/journal", journalRoutes); // ✅ MUST BE BEFORE notFound
 
 /* ======================
    HEALTH CHECK
@@ -56,10 +58,6 @@ const server = app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
 
-
 server.on("error", (err) => {
   console.error("❌ LISTEN ERROR:", err);
 });
-
-const journalRoutes = require("./src/routes/journal.routes");
-app.use("/api/journal", journalRoutes);
