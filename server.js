@@ -22,7 +22,15 @@ const app = express();
 /* ======================
    MIDDLEWARE
 ====================== */
-app.use(cors());
+app.use(
+  cors({
+    origin: ["https://checkinauabc.vercel.app", "http://localhost:3000"],
+    credentials: false,
+    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  })
+);
+
 app.use(express.json());
 app.use(morgan("dev"));
 
