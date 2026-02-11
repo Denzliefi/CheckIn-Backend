@@ -12,6 +12,7 @@ const authRoutes = require("./src/routes/auth.routes");
 const counselingRoutes = require("./src/routes/counseling.routes");
 const userRoutes = require("./src/routes/user.routes");
 const journalRoutes = require("./src/routes/journal.routes");
+const assessmentRoutes = require("./src/routes/assessment.routes");
 
 const { notFound, errorHandler } = require("./src/middleware/errormiddleware");
 
@@ -46,7 +47,9 @@ app.get("/", (req, res) => res.json({ ok: true, message: "API running" }));
 app.use("/api/auth", authRoutes);
 app.use("/api/counseling", counselingRoutes);
 app.use("/api/users", userRoutes);
-app.use("/api/journal", journalRoutes); // ✅ journal MUST be mounted before notFound
+app.use("/api/journal", journalRoutes);
+app.use("/api/assessments", assessmentRoutes);
+ // ✅ journal MUST be mounted before notFound
 
 /* ======================
    ERROR MIDDLEWARE (LAST)
