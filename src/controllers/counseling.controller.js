@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const CounselingRequest = require("../models/CounselingRequest");
 const { validateMeetRules } = require("../utils/counselingValidation");
 const User = require("../models/User.model");
@@ -51,36 +52,29 @@ exports.createMeet = async (req, res) => {
     // counselorId is optional: if missing, auto-assign the first available counselor for the slot
     let counselor = counselorId ? String(counselorId).trim() : "";
 
-    if (counselor && !mongoose.isValidObjectId(counselor)) {
-      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
-    }
-
-    if (counselor) {
-      const exists = await User.exists({ _id: counselor, role: "Counselor" });
-      if (!exists) {
-        return res.status(404).json({ code: "COUNSELOR_NOT_FOUND", message: "Selected counselor not found." });
-      }
-    }
-
     if (!counselor) {
-      const counselors = await User.find({ role: "Counselor" })
-        .select("_id fullName")
+      const counselors = await User.find({
+        role: "Counselor",
+        counselorCode: { $exists: true, $ne: "" },
+      })
+        .select("counselorCode fullName")
         .sort({ fullName: 1 })
         .lean();
 
       for (const c of counselors) {
-        const cId = String(c._id);
+        const code = String(c.counselorCode || "").trim();
+        if (!code) continue;
 
         const conflict = await CounselingRequest.findOne({
           type: "MEET",
-          counselorId: cId,
+          counselorId: code,
           date,
           time,
           status: { $in: ["Pending", "Approved"] },
         }).lean();
 
         if (!conflict) {
-          counselor = cId;
+          counselor = code;
           break;
         }
       }
@@ -146,9 +140,10 @@ exports.listRequests = async (req, res) => {
     // ✅ Default scoping: Students can ONLY see their own requests (even if mine=false)
     if (!isPrivileged) {
       q.userId = req.user?.id;
-    } else if (role === "Counselor") {
-      // ✅ Counselors only see requests assigned to their user _id by default
-      q.counselorId = req.user?.id;
+    } else if (role === "Counselor" && counselorCode) {
+      // ✅ Counselors (later dashboard) should only see requests assigned to them by default
+      // You can expand this later for admin views.
+      q.counselorId = counselorCode;
     }
 
     if (mine) q.userId = req.user?.id;
@@ -164,6 +159,7 @@ exports.listRequests = async (req, res) => {
 
     const items = await CounselingRequest.find(q)
       .sort({ createdAt: -1 })
+      .populate("counselorId", "fullName role")
       .lean();
 
     return res.json({ items: items.map(formatRequestLean) });
@@ -180,7 +176,7 @@ exports.listRequests = async (req, res) => {
 exports.getRequest = async (req, res) => {
   try {
     const id = req.params.id;
-    const doc = await CounselingRequest.findById(id).lean();
+    const doc = await CounselingRequest.findById(id).populate("counselorId", "fullName role").lean();
 
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
@@ -421,21 +417,16 @@ exports.setAskThreadStatus = async (req, res) => {
  */
 exports.listCounselors = async (req, res) => {
   try {
-    const users = await User.find({
-      role: "Counselor",
-      counselorCode: { $exists: true, $ne: "" },
-    })
-      .select("_id fullName counselorCode specialty role")
+    // ✅ Counselors are in the same Users collection; role is the only differentiator
+    const users = await User.find({ role: "Counselor" })
+      .select("_id fullName role")
       .sort({ fullName: 1 })
       .lean();
 
     return res.json({
       items: users.map((u) => ({
-        id: u._id,
-        counselorCode: u.counselorCode || "",
-        // id is the counselor user's _id (ObjectId)
+        id: String(u._id), // ✅ counselor User _id (ObjectId)
         name: u.fullName,
-        specialty: u.specialty || [],
         role: u.role,
       })),
     });
@@ -453,8 +444,7 @@ exports.listCounselors = async (req, res) => {
 exports.getAvailability = async (req, res) => {
   try {
     const date = String(req.query.date || "").trim();
-    const counselorIdRaw = req.query.counselorId ? String(req.query.counselorId).trim() : "";
-    const counselorId = counselorIdRaw || "";
+    const counselorId = req.query.counselorId ? String(req.query.counselorId).trim() : "";
 
     if (!date) {
       return res.status(400).json({ code: "MISSING_DATE", message: "date is required (YYYY-MM-DD)." });
@@ -474,18 +464,18 @@ exports.getAvailability = async (req, res) => {
       return res.status(400).json({ code: "INVALID_DATE", message: "Weekends are not allowed." });
     }
 
-    if (counselorId && !mongoose.isValidObjectId(counselorId)) {
-      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
-    }
-
     const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
     const allSlots = generateSlots(workHours.start, workHours.end, workHours.stepMin);
 
     // ✅ If counselorId is provided, compute for that counselor only (based on bookings)
     if (counselorId) {
+      if (!mongoose.isValidObjectId(counselorId)) {
+        return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
+      }
+
       const booked = await CounselingRequest.find({
         type: "MEET",
-        counselorId,
+        counselorId: counselorId,
         date,
         status: { $in: ["Pending", "Approved"] },
       })
@@ -506,11 +496,9 @@ exports.getAvailability = async (req, res) => {
     }
 
     // ✅ No counselorId provided: "any counselor" availability
-    // Load counselor roster from Users (must have counselorCode)
-    const counselors = await User.find({
-      role: "Counselor",
-    })
-      .select("_id fullName counselorCode")
+    // Load counselor roster from Users (role only)
+    const counselors = await User.find({ role: "Counselor" })
+      .select("fullName")
       .lean();
 
     if (counselors.length === 0) {
@@ -541,8 +529,7 @@ exports.getAvailability = async (req, res) => {
     }
 
     const roster = counselors.map((c) => ({
-      id: c._id,
-      counselorCode: c.counselorCode || "",
+      id: String(c._id), // must match CounselingRequest.counselorId
       name: c.fullName,
     }));
 
@@ -566,18 +553,75 @@ exports.getAvailability = async (req, res) => {
   }
 };
 
-const THREAD_STATUS_ALLOWED = new Set([
-  "NEW",
-  "UNDER_REVIEW",
-  "APPOINTMENT_REQUIRED",
-  "SCHEDULED",
-  "IN_SESSION",
-  "WAITING_ON_STUDENT",
-  "FOLLOW_UP_REQUIRED",
-  "COMPLETED",
-  "CLOSED",
-  "URGENT",
-  "CRISIS",
-]);
+// ---------- local helpers for availability ----------
+function toMinutes(hhmm) {
+  const [h, m] = String(hhmm).split(":").map((x) => parseInt(x, 10));
+  return h * 60 + m;
+}
 
+function toHHMM(mins) {
+  const h = String(Math.floor(mins / 60)).padStart(2, "0");
+  const m = String(mins % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function generateSlots(startHHMM, endHHMM, stepMin) {
+  const start = toMinutes(startHHMM);
+  const end = toMinutes(endHHMM);
+  const slots = [];
+  for (let t = start; t <= end; t += stepMin) {
+    slots.push(toHHMM(t));
+  }
+  return slots;
+}
+
+
+// ---------- helpers ----------
+function formatRequest(doc) {
+  const o = doc.toObject ? doc.toObject() : doc;
+  return formatRequestLean(o);
+}
+
+function formatRequestLean(o) {
+  const counselorName =
+    (o?.counselorId && typeof o.counselorId === "object" && o.counselorId.fullName) ||
+    o?.counselorName ||
+    "";
+
+  const counselorId =
+    o?.counselorId && typeof o.counselorId === "object" && o.counselorId._id
+      ? String(o.counselorId._id)
+      : o?.counselorId
+      ? String(o.counselorId)
+      : "";
+
+  return {
+    id: o._id,
+    userId: o.userId,
+    type: o.type,
+    status: o.status,
+    createdAt: o.createdAt,
+    updatedAt: o.updatedAt,
+
+    topic: o.topic,
+    message: o.message,
+    anonymous: o.anonymous,
+    counselorReply: o.counselorReply,
+    repliedAt: o.repliedAt,
+
+    sessionType: o.sessionType,
+    reason: o.reason,
+    date: o.date,
+    time: o.time,
+    counselorId,
+    counselorName,
+    notes: o.notes,
+
+    approvedBy: o.approvedBy,
+    disapprovalReason: o.disapprovalReason,
+    meetingLink: o.meetingLink,
+    location: o.location,
+    completedAt: o.completedAt,
+  };
+}
 
