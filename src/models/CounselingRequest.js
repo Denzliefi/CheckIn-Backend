@@ -72,8 +72,9 @@ const CounselingRequestSchema = new mongoose.Schema(
 
 // Prevent double-booking by counselor/date/time for MEET when pending/approved
 CounselingRequestSchema.index(
-  { counselorId: 1, date: 1, time: 1, type: 1, status: 1 },
+  { counselorId: 1, date: 1, time: 1 },
   {
+    unique: true,
     partialFilterExpression: {
       type: "MEET",
       status: { $in: ["Pending", "Approved"] },

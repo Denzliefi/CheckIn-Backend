@@ -1,31 +1,7 @@
-const mongoose = require("mongoose");
-const { DateTime } = require("luxon");
-
 const CounselingRequest = require("../models/CounselingRequest");
-const { validateMeetRules, PH_TZ } = require("../utils/counselingValidation");
+const { validateMeetRules } = require("../utils/counselingValidation");
 const { generateTimeSlots } = require("../utils/availability");
 const User = require("../models/User.model");
-
-/* =========================
-   HELPERS
-========================= */
-function phDateOf(jsDate) {
-  if (!jsDate) return null;
-  const dt = DateTime.fromJSDate(jsDate, { zone: PH_TZ });
-  if (!dt.isValid) return null;
-  return dt.toISODate(); // YYYY-MM-DD
-}
-
-/**
- * If a meeting was cancelled on the same calendar date as the meeting date,
- * we keep the slot blocked (prevents last-minute cancellations freeing the slot).
- */
-function isSameDayCancellation(doc) {
-  if (!doc || doc.status !== "Cancelled") return false;
-  if (!doc.cancelledAt || !doc.date) return false;
-  const cancelledDate = phDateOf(new Date(doc.cancelledAt));
-  return cancelledDate === doc.date;
-}
 /**
  * Student: Create ASK
  * POST /api/counseling/requests/ask
@@ -64,7 +40,7 @@ exports.createMeet = async (req, res) => {
     const userId = req.user?.id;
     const { sessionType, reason, date, time, counselorId, notes } = req.body || {};
 
-    if (!sessionType || !reason || !date || !time || !counselorId) {
+    if (!sessionType || !reason || !date || !time) {
       return res.status(400).json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
     }
 
@@ -73,32 +49,54 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
-    const counselor = String(counselorId).trim();
-    if (!mongoose.isValidObjectId(counselor)) {
-      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
+    // counselorId is optional: if missing, auto-assign the first available counselor for the slot
+    let counselor = counselorId ? String(counselorId).trim() : "";
+
+    if (!counselor) {
+      const counselors = await User.find({
+        role: "Counselor",
+        counselorCode: { $exists: true, $ne: "" },
+      })
+        .select("counselorCode fullName")
+        .sort({ fullName: 1 })
+        .lean();
+
+      for (const c of counselors) {
+        const code = String(c.counselorCode || "").trim();
+        if (!code) continue;
+
+        const conflict = await CounselingRequest.findOne({
+          type: "MEET",
+          counselorId: code,
+          date,
+          time,
+          status: { $in: ["Pending", "Approved"] },
+        }).lean();
+
+        if (!conflict) {
+          counselor = code;
+          break;
+        }
+      }
+
+      if (!counselor) {
+        return res.status(409).json({
+          code: "NO_COUNSELOR_AVAILABLE",
+          message: "No counselors available for the selected date/time.",
+        });
+      }
     }
 
-    const counselorExists = await User.exists({ _id: counselor, role: "Counselor" });
-    if (!counselorExists) {
-      return res.status(404).json({ code: "COUNSELOR_NOT_FOUND", message: "Selected counselor not found." });
-    }
-
-    // slot conflict check, also blocks same-day cancellations
-    const conflictDocs = await CounselingRequest.find({
+    // slot conflict check (Pending/Approved MEET)
+    const conflict = await CounselingRequest.findOne({
       type: "MEET",
       counselorId: counselor,
       date,
       time,
-      status: { $in: ["Pending", "Approved", "Cancelled"] },
-    })
-      .select("status cancelledAt date")
-      .lean();
+      status: { $in: ["Pending", "Approved"] },
+    }).lean();
 
-    const taken =
-      conflictDocs.some((d) => d.status === "Pending" || d.status === "Approved") ||
-      conflictDocs.some((d) => isSameDayCancellation(d));
-
-    if (taken) {
+    if (conflict) {
       return res.status(409).json({ code: "SLOT_TAKEN", message: "Time slot already booked." });
     }
 
@@ -136,14 +134,16 @@ exports.listRequests = async (req, res) => {
 
 
     const role = String(req.user?.role || "");
+    const counselorCode = String(req.user?.counselorCode || "");
     const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
 
     // ✅ Default scoping: Students can ONLY see their own requests (even if mine=false)
     if (!isPrivileged) {
       q.userId = req.user?.id;
-    } else if (role === "Counselor") {
-      // ✅ Counselors see requests assigned to them (their User _id)
-      q.counselorId = req.user?.id;
+    } else if (role === "Counselor" && counselorCode) {
+      // ✅ Counselors (later dashboard) should only see requests assigned to them by default
+      // You can expand this later for admin views.
+      q.counselorId = counselorCode;
     }
 
     if (mine) q.userId = req.user?.id;
@@ -212,8 +212,6 @@ exports.cancelRequest = async (req, res) => {
     }
 
     doc.status = "Cancelled";
-    // ✅ used for same-day cancellation blocking in availability/booking
-    doc.cancelledAt = new Date();
     await doc.save();
 
     return res.json(formatRequest(doc));
@@ -418,16 +416,19 @@ exports.setAskThreadStatus = async (req, res) => {
  */
 exports.listCounselors = async (req, res) => {
   try {
-    // ✅ Counselors are in the same Users collection; role is the differentiator
-    const users = await User.find({ role: "Counselor" })
-      .select("_id firstName lastName fullName role")
+    const users = await User.find({
+      role: "Counselor",
+      counselorCode: { $exists: true, $ne: "" },
+    })
+      .select("_id fullName counselorCode specialty role")
       .sort({ fullName: 1 })
       .lean();
 
     return res.json({
       items: users.map((u) => ({
-        id: String(u._id), // ✅ counselor User _id (ObjectId)
-        name: u.fullName || `${u.firstName || ""} ${u.lastName || ""}`.trim(),
+        id: u.counselorCode, // ✅ "C-101"
+        name: u.fullName,
+        specialty: u.specialty || [],
         role: u.role,
       })),
     });
@@ -440,7 +441,7 @@ exports.listCounselors = async (req, res) => {
 
 /**
  * Get counselor availability for a date
- * GET /api/counseling/availability?date=YYYY-MM-DD&counselorId=<counselorUserId>(optional)
+ * GET /api/counseling/availability?date=YYYY-MM-DD&counselorId=C-101(optional)
  */
 exports.getAvailability = async (req, res) => {
   try {
@@ -450,7 +451,6 @@ exports.getAvailability = async (req, res) => {
     if (!date) {
       return res.status(400).json({ code: "MISSING_DATE", message: "date is required (YYYY-MM-DD)." });
     }
-
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date format. Use YYYY-MM-DD." });
     }
@@ -466,28 +466,43 @@ exports.getAvailability = async (req, res) => {
     }
 
     const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
-    const allSlots = generateTimeSlots(workHours.start, workHours.end, workHours.stepMin);
+    const allSlots = (typeof generateTimeSlots === "function"
+      ? generateTimeSlots(workHours.start, workHours.end, workHours.stepMin)
+      : generateSlots(workHours.start, workHours.end, workHours.stepMin)
+    );
+
+    // Same-day cancellation rule:
+    // - Pending/Approved always block
+    // - Cancelled blocks ONLY if cancelledAt is on the SAME (PH) calendar day as the session date
+    const toPHDate = (dt) => {
+      try {
+        return new Date(dt).toLocaleDateString("en-CA", { timeZone: "Asia/Manila" }); // YYYY-MM-DD
+      } catch {
+        return "";
+      }
+    };
+    const blocksSlot = (doc) => {
+      const status = String(doc.status || "");
+      if (status === "Pending" || status === "Approved") return true;
+      if (status === "Cancelled") {
+        const cancelledPh = doc.cancelledAt ? toPHDate(doc.cancelledAt) : "";
+        return cancelledPh === date;
+      }
+      return false;
+    };
 
     // ✅ If counselorId is provided, compute for that counselor only (based on bookings)
     if (counselorId) {
-      if (!mongoose.isValidObjectId(counselorId)) {
-        return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
-      }
-
-      const booked = await CounselingRequest.find({
+      const rows = await CounselingRequest.find({
         type: "MEET",
         counselorId,
         date,
         status: { $in: ["Pending", "Approved", "Cancelled"] },
       })
-        .select("time status cancelledAt date")
+        .select("time status cancelledAt")
         .lean();
 
-      const bookedTimes = new Set(
-        booked
-          .filter((b) => b.status === "Pending" || b.status === "Approved" || isSameDayCancellation(b))
-          .map((b) => b.time)
-      );
+      const bookedTimes = new Set(rows.filter(blocksSlot).map((b) => b.time));
 
       return res.json({
         date,
@@ -501,8 +516,9 @@ exports.getAvailability = async (req, res) => {
     }
 
     // ✅ No counselorId provided: "any counselor" availability
+    // Counselors are stored in Users (role: Counselor)
     const counselors = await User.find({ role: "Counselor" })
-      .select("_id fullName firstName lastName")
+      .select("_id firstName lastName fullName")
       .lean();
 
     if (counselors.length === 0) {
@@ -520,14 +536,13 @@ exports.getAvailability = async (req, res) => {
       date,
       status: { $in: ["Pending", "Approved", "Cancelled"] },
     })
-      .select("time counselorId status cancelledAt date")
+      .select("time counselorId status cancelledAt")
       .lean();
 
     // Map: time -> set(booked counselorIds)
     const bookedMap = new Map();
     for (const b of bookings) {
-      // ✅ Cancelled only blocks when cancelled on same date as meeting date
-      if (b.status === "Cancelled" && !isSameDayCancellation(b)) continue;
+      if (!blocksSlot(b)) continue;
       const t = b.time;
       const cId = String(b.counselorId || "");
       if (!bookedMap.has(t)) bookedMap.set(t, new Set());
@@ -536,7 +551,7 @@ exports.getAvailability = async (req, res) => {
 
     const roster = counselors.map((c) => ({
       id: String(c._id),
-      name: c.fullName || `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+      name: c.fullName || [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "Counselor",
     }));
 
     const slots = allSlots.map((t) => {
@@ -548,7 +563,7 @@ exports.getAvailability = async (req, res) => {
       return {
         time: t,
         enabled: true,
-        availableCounselors: available, // useful for frontend auto-pick
+        availableCounselors: available,
       };
     });
 
