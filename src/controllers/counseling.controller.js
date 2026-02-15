@@ -51,29 +51,36 @@ exports.createMeet = async (req, res) => {
     // counselorId is optional: if missing, auto-assign the first available counselor for the slot
     let counselor = counselorId ? String(counselorId).trim() : "";
 
+    if (counselor && !mongoose.isValidObjectId(counselor)) {
+      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
+    }
+
+    if (counselor) {
+      const exists = await User.exists({ _id: counselor, role: "Counselor" });
+      if (!exists) {
+        return res.status(404).json({ code: "COUNSELOR_NOT_FOUND", message: "Selected counselor not found." });
+      }
+    }
+
     if (!counselor) {
-      const counselors = await User.find({
-        role: "Counselor",
-        counselorCode: { $exists: true, $ne: "" },
-      })
-        .select("counselorCode fullName")
+      const counselors = await User.find({ role: "Counselor" })
+        .select("_id fullName")
         .sort({ fullName: 1 })
         .lean();
 
       for (const c of counselors) {
-        const code = String(c.counselorCode || "").trim();
-        if (!code) continue;
+        const cId = String(c._id);
 
         const conflict = await CounselingRequest.findOne({
           type: "MEET",
-          counselorId: code,
+          counselorId: cId,
           date,
           time,
           status: { $in: ["Pending", "Approved"] },
         }).lean();
 
         if (!conflict) {
-          counselor = code;
+          counselor = cId;
           break;
         }
       }
@@ -139,10 +146,9 @@ exports.listRequests = async (req, res) => {
     // ✅ Default scoping: Students can ONLY see their own requests (even if mine=false)
     if (!isPrivileged) {
       q.userId = req.user?.id;
-    } else if (role === "Counselor" && counselorCode) {
-      // ✅ Counselors (later dashboard) should only see requests assigned to them by default
-      // You can expand this later for admin views.
-      q.counselorId = counselorCode;
+    } else if (role === "Counselor") {
+      // ✅ Counselors only see requests assigned to their user _id by default
+      q.counselorId = req.user?.id;
     }
 
     if (mine) q.userId = req.user?.id;
@@ -425,7 +431,9 @@ exports.listCounselors = async (req, res) => {
 
     return res.json({
       items: users.map((u) => ({
-        id: u.counselorCode, // ✅ "C-101"
+        id: u._id,
+        counselorCode: u.counselorCode || "",
+        // id is the counselor user's _id (ObjectId)
         name: u.fullName,
         specialty: u.specialty || [],
         role: u.role,
@@ -440,12 +448,13 @@ exports.listCounselors = async (req, res) => {
 
 /**
  * Get counselor availability for a date
- * GET /api/counseling/availability?date=YYYY-MM-DD&counselorId=C-101(optional)
+ * GET /api/counseling/availability?date=YYYY-MM-DD&counselorId=<counselorUserId>(optional)
  */
 exports.getAvailability = async (req, res) => {
   try {
     const date = String(req.query.date || "").trim();
-    const counselorId = req.query.counselorId ? String(req.query.counselorId).trim() : "";
+    const counselorIdRaw = req.query.counselorId ? String(req.query.counselorId).trim() : "";
+    const counselorId = counselorIdRaw || "";
 
     if (!date) {
       return res.status(400).json({ code: "MISSING_DATE", message: "date is required (YYYY-MM-DD)." });
@@ -463,6 +472,10 @@ exports.getAvailability = async (req, res) => {
     const day = d.getUTCDay(); // 0 Sun ... 6 Sat
     if (day === 0 || day === 6) {
       return res.status(400).json({ code: "INVALID_DATE", message: "Weekends are not allowed." });
+    }
+
+    if (counselorId && !mongoose.isValidObjectId(counselorId)) {
+      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
     }
 
     const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
@@ -496,9 +509,8 @@ exports.getAvailability = async (req, res) => {
     // Load counselor roster from Users (must have counselorCode)
     const counselors = await User.find({
       role: "Counselor",
-      counselorCode: { $exists: true, $ne: "" },
     })
-      .select("fullName counselorCode")
+      .select("_id fullName counselorCode")
       .lean();
 
     if (counselors.length === 0) {
@@ -529,7 +541,8 @@ exports.getAvailability = async (req, res) => {
     }
 
     const roster = counselors.map((c) => ({
-      id: c.counselorCode, // must match CounselingRequest.counselorId
+      id: c._id,
+      counselorCode: c.counselorCode || "",
       name: c.fullName,
     }));
 
@@ -567,99 +580,4 @@ const THREAD_STATUS_ALLOWED = new Set([
   "CRISIS",
 ]);
 
-exports.setAskThreadStatus = async (req, res) => {
-  try {
-    const { id } = req.params; // request id
-    const { status } = req.body || {};
-
-    if (!status || !THREAD_STATUS_ALLOWED.has(String(status))) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
-
-    const doc = await CounselingRequest.findById(id);
-    if (!doc) return res.status(404).json({ message: "Request not found" });
-
-    // Only ASK requests have threadStatus
-    if (doc.type !== "ASK") {
-      return res.status(400).json({ message: "threadStatus can only be set for ASK requests" });
-    }
-
-    doc.threadStatus = String(status);
-    doc.threadStatusUpdatedAt = new Date();
-    doc.threadStatusUpdatedBy = req.user?.id;
-
-    await doc.save();
-
-    return res.json({
-      ok: true,
-      id: doc._id,
-      threadStatus: doc.threadStatus,
-      threadStatusUpdatedAt: doc.threadStatusUpdatedAt,
-      threadStatusUpdatedBy: doc.threadStatusUpdatedBy,
-    });
-  } catch (err) {
-    console.error("setAskThreadStatus error:", err);
-    return res.status(500).json({ message: "Server error." });
-  }
-};
-
-
-// ---------- local helpers for availability ----------
-function toMinutes(hhmm) {
-  const [h, m] = String(hhmm).split(":").map((x) => parseInt(x, 10));
-  return h * 60 + m;
-}
-
-function toHHMM(mins) {
-  const h = String(Math.floor(mins / 60)).padStart(2, "0");
-  const m = String(mins % 60).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
-function generateSlots(startHHMM, endHHMM, stepMin) {
-  const start = toMinutes(startHHMM);
-  const end = toMinutes(endHHMM);
-  const slots = [];
-  for (let t = start; t <= end; t += stepMin) {
-    slots.push(toHHMM(t));
-  }
-  return slots;
-}
-
-
-// ---------- helpers ----------
-function formatRequest(doc) {
-  const o = doc.toObject ? doc.toObject() : doc;
-  return formatRequestLean(o);
-}
-
-function formatRequestLean(o) {
-  return {
-    id: o._id,
-    userId: o.userId,
-    type: o.type,
-    status: o.status,
-    createdAt: o.createdAt,
-    updatedAt: o.updatedAt,
-
-    topic: o.topic,
-    message: o.message,
-    anonymous: o.anonymous,
-    counselorReply: o.counselorReply,
-    repliedAt: o.repliedAt,
-
-    sessionType: o.sessionType,
-    reason: o.reason,
-    date: o.date,
-    time: o.time,
-    counselorId: o.counselorId,
-    notes: o.notes,
-
-    approvedBy: o.approvedBy,
-    disapprovalReason: o.disapprovalReason,
-    meetingLink: o.meetingLink,
-    location: o.location,
-    completedAt: o.completedAt,
-  };
-}
 

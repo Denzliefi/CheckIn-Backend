@@ -5,6 +5,7 @@ const cors = require("cors");
 // routes
 const authRoutes = require("./routes/auth.routes"); // you probably already have this
 const userRoutes = require("./routes/user.routes");
+const counselingRoutes = require("./routes/counseling.routes");
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.use(express.json()); // so req.body works
 ========================= */
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/counseling", counselingRoutes);
 
 /* =========================
    FALLBACK
