@@ -1,62 +1,64 @@
 const express = require("express");
 const router = express.Router();
 
-const counseling = require("../controllers/counseling.controller");
-
-// ✅ FIX: destructure named exports so you get functions (not objects)
 const { protect } = require("../middleware/auth.middleware");
 const { requireRole } = require("../middleware/role.middleware");
 
-/**
- * Public (authenticated) helpers
- */
-router.get("/counselors", protect, counseling.listCounselors);
-router.get("/availability", protect, counseling.getAvailability);
+const counseling = require("../controllers/counseling.controller");
 
-/**
- * Student endpoints
- */
+// Student endpoints
+router.post("/requests/ask", protect, counseling.createAsk);
+router.post("/requests/meet", protect, counseling.createMeet);
+router.get("/availability", protect, counseling.getAvailability);
 router.get("/requests", protect, counseling.listRequests);
 router.get("/requests/:id", protect, counseling.getRequest);
+router.patch("/requests/:id/cancel", protect, counseling.cancelRequest);
 
-router.post("/requests/ask", protect, requireRole("Student"), counseling.createAskRequest);
-router.post("/requests/meet", protect, requireRole("Student"), counseling.createMeetRequest);
+router.get("/counselors", protect, counseling.listCounselors);
 
-router.patch("/requests/:id/cancel", protect, requireRole("Student"), counseling.cancelRequest);
 
-/**
- * Counselor/Admin actions (for counselor dashboard later)
- */
+// Admin/Counselor endpoints
+router.get(
+  "/admin/requests",
+  protect,
+  requireRole("Admin", "Counselor", "Student"),
+  counseling.listRequests
+);
+
+router.patch(
+  "/admin/requests/:id/thread-status",
+  protect,
+  requireRole("Admin", "Counselor"),
+  counseling.setAskThreadStatus
+);
+
+
 router.patch(
   "/admin/requests/:id/approve",
   protect,
-  requireRole("Counselor", "Admin"),
+  requireRole("Admin", "Counselor", "Student"),
   counseling.approveRequest
 );
+
 router.patch(
   "/admin/requests/:id/disapprove",
   protect,
-  requireRole("Counselor", "Admin"),
+  requireRole("Admin", "Counselor", "Student"),
   counseling.disapproveRequest
 );
+
 router.patch(
   "/admin/requests/:id/complete",
   protect,
-  requireRole("Counselor", "Admin"),
+  requireRole("Admin", "Counselor", "Student"),
   counseling.completeRequest
 );
 
 router.patch(
   "/admin/requests/:id/reply",
   protect,
-  requireRole("Counselor", "Admin"),
+  requireRole("Admin", "Counselor", "Student"),
   counseling.replyToAsk
-);
-router.patch(
-  "/admin/requests/:id/thread-status",
-  protect,
-  requireRole("Counselor", "Admin"),
-  counseling.setAskThreadStatus
 );
 
 module.exports = router;

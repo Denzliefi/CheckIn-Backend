@@ -1,35 +1,13 @@
 const mongoose = require("mongoose");
 
-/**
- * CounselingRequest
- * - ASK: message thread (student -> counselor reply)
- * - MEET: appointment request (date/time + counselor)
- *
- * Note:
- * - counselorId is stored as a string for compatibility with existing code,
- *   and should be the counselor user's _id string.
- */
-
 const CounselingRequestSchema = new mongoose.Schema(
   {
+    // student who created it
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+
     type: { type: String, enum: ["ASK", "MEET"], required: true },
 
-    userId: { type: String, required: true }, // student's user _id as string
-
-    // appointment fields
-    counselorId: { type: String, default: "" }, // counselor user _id as string
-    sessionType: { type: String, enum: ["Online", "In Person"], default: "" },
-    reason: { type: String, default: "" },
-    date: { type: String, default: "" }, // YYYY-MM-DD
-    time: { type: String, default: "" }, // HH:MM
-    notes: { type: String, default: "" },
-
-    // ask fields
-    studentMessage: { type: String, default: "" },
-    counselorReply: { type: String, default: "" },
-    replyAt: { type: Date },
-
-    // statuses
+    // ✅ EXISTING request workflow status (DO NOT TOUCH)
     status: {
       type: String,
       enum: ["Pending", "Approved", "Disapproved", "Cancelled", "Completed"],
@@ -37,33 +15,67 @@ const CounselingRequestSchema = new mongoose.Schema(
       index: true,
     },
 
-    threadStatus: { type: String, enum: ["Open", "Resolved", "Closed"], default: "Open" },
+    // ✅ Counselor thread lifecycle status (ASK only)
+    threadStatus: {
+      type: String,
+      enum: [
+        "NEW",
+        "UNDER_REVIEW",
+        "APPOINTMENT_REQUIRED",
+        "SCHEDULED",
+        "IN_SESSION",
+        "WAITING_ON_STUDENT",
+        "FOLLOW_UP_REQUIRED",
+        "COMPLETED",
+        "CLOSED",
+        "URGENT",
+        "CRISIS",
+      ],
+      default: "NEW",
+      index: true,
+    },
 
-    // audit timestamps
-    cancelledAt: { type: Date },
-    approvedAt: { type: Date },
-    disapprovedAt: { type: Date },
+    threadStatusUpdatedAt: { type: Date },
+    threadStatusUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    // ASK fields
+    topic: { type: String, trim: true },
+    message: { type: String, trim: true },
+    anonymous: { type: Boolean, default: true },
+    counselorReply: { type: String, trim: true },
+    repliedAt: { type: Date },
+
+    // MEET fields
+    sessionType: { type: String, enum: ["Online", "In-person"] },
+    reason: { type: String, trim: true },
+    date: { type: String }, // YYYY-MM-DD (PH date)
+    time: { type: String }, // HH:MM (24h)
+
+    // ✅ Counselor is a real user (role: Counselor)
+    counselorId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    notes: { type: String, trim: true },
+
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    disapprovalReason: { type: String, trim: true },
+
+    meetingLink: { type: String, trim: true },
+    location: { type: String, trim: true },
+
     completedAt: { type: Date },
-    disapprovalNote: { type: String, default: "" },
   },
   { timestamps: true }
 );
 
-/**
- * Prevent double booking:
- * One counselor cannot have two MEET requests on same date+time in Pending/Approved.
- * We do this with a partial unique index (MongoDB supports partialFilterExpression).
- */
+// Prevent double-booking by counselor/date/time for MEET when pending/approved
 CounselingRequestSchema.index(
-  { counselorId: 1, date: 1, time: 1, type: 1 },
+  { counselorId: 1, date: 1, time: 1, type: 1, status: 1 },
   {
-    unique: true,
-    partialFilterExpression: { type: "MEET", status: { $in: ["Pending", "Approved"] } },
+    partialFilterExpression: {
+      type: "MEET",
+      status: { $in: ["Pending", "Approved"] },
+    },
   }
 );
-
-// Helpful query indexes
-CounselingRequestSchema.index({ userId: 1, createdAt: -1 });
-CounselingRequestSchema.index({ counselorId: 1, createdAt: -1 });
 
 module.exports = mongoose.model("CounselingRequest", CounselingRequestSchema);

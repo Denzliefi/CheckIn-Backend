@@ -41,6 +41,10 @@ const UserSchema = new mongoose.Schema(
 
     password: { type: String, select: false }, // optional for Google accounts
 
+    // Optional counselor profile fields (used when role === "Counselor")
+    counselorCode: { type: String, trim: true, maxlength: 32, index: true, sparse: true },
+    specialty: [{ type: String, trim: true, maxlength: 80 }],
+
     role: { type: String, default: "Student" },
     accountCreation: { type: Date, default: Date.now },
   },
