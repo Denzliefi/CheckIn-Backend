@@ -2,10 +2,12 @@ const mongoose = require("mongoose");
 
 const CounselingRequestSchema = new mongoose.Schema(
   {
+    // student who created it
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
     type: { type: String, enum: ["ASK", "MEET"], required: true },
 
+    // ✅ EXISTING request workflow status (DO NOT TOUCH)
     status: {
       type: String,
       enum: ["Pending", "Approved", "Disapproved", "Cancelled", "Completed"],
@@ -13,6 +15,7 @@ const CounselingRequestSchema = new mongoose.Schema(
       index: true,
     },
 
+    // ✅ Counselor thread lifecycle status (ASK only)
     threadStatus: {
       type: String,
       enum: [
@@ -48,10 +51,13 @@ const CounselingRequestSchema = new mongoose.Schema(
     date: { type: String }, // YYYY-MM-DD (PH date)
     time: { type: String }, // HH:MM (24h)
 
-    // counselor is a real User with role "Counselor"
+    // ✅ Counselor is a real user (role: Counselor)
     counselorId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
     notes: { type: String, trim: true },
+
+    // ✅ for same-day cancellation blocking logic
+    cancelledAt: { type: Date },
 
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     disapprovalReason: { type: String, trim: true },
@@ -60,9 +66,6 @@ const CounselingRequestSchema = new mongoose.Schema(
     location: { type: String, trim: true },
 
     completedAt: { type: Date },
-
-    // NEW: when a request was cancelled
-    cancelledAt: { type: Date },
   },
   { timestamps: true }
 );
