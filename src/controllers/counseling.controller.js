@@ -1,20 +1,17 @@
 const CounselingRequest = require("../models/CounselingRequest");
 const { validateMeetRules } = require("../utils/counselingValidation");
 const User = require("../models/User.model");
-
 /**
  * Student: Create ASK
  * POST /api/counseling/requests/ask
  */
 exports.createAsk = async (req, res) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id; // protect middleware should set req.user
     const { topic, message, anonymous = true } = req.body || {};
 
     if (!topic || !message) {
-      return res
-        .status(400)
-        .json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
+      return res.status(400).json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
     }
 
     const doc = await CounselingRequest.create({
@@ -43,9 +40,7 @@ exports.createMeet = async (req, res) => {
     const { sessionType, reason, date, time, counselorId, notes } = req.body || {};
 
     if (!sessionType || !reason || !date || !time) {
-      return res
-        .status(400)
-        .json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
+      return res.status(400).json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
     }
 
     const rule = validateMeetRules({ date, time });
@@ -53,26 +48,13 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
-    const counselor = counselorId ? String(counselorId).trim() : "";
+    // optional: require counselorId for now; or auto assign later
+    const counselor = counselorId ? String(counselorId).trim() : null;
     if (!counselor) {
       return res.status(400).json({ code: "MISSING_COUNSELOR", message: "Please select a counselor." });
     }
 
-    // Prevent multiple active MEET requests per student (Pending/Approved).
-    const active = await CounselingRequest.findOne({
-      userId,
-      type: "MEET",
-      status: { $in: ["Pending", "Approved"] },
-    }).lean();
-
-    if (active) {
-      return res.status(409).json({
-        code: "ACTIVE_MEET_EXISTS",
-        message: "You already have an active appointment request.",
-      });
-    }
-
-    // Slot conflict check (Pending/Approved MEET)
+    // slot conflict check (Pending/Approved MEET)
     const conflict = await CounselingRequest.findOne({
       type: "MEET",
       counselorId: counselor,
@@ -89,10 +71,10 @@ exports.createMeet = async (req, res) => {
       userId,
       type: "MEET",
       status: "Pending",
-      sessionType: String(sessionType).trim(),
+      sessionType,
       reason: String(reason).trim(),
-      date: String(date).trim(),
-      time: String(time).trim(),
+      date,
+      time,
       counselorId: counselor,
       notes: notes ? String(notes).trim() : "",
     });
@@ -106,32 +88,36 @@ exports.createMeet = async (req, res) => {
 
 /**
  * Student: List my requests
- * GET /api/counseling/requests
- *
- * Notes:
- * - Students are ALWAYS scoped to their own requests, regardless of query params.
+ * GET /api/counseling/requests?mine=true&status=&type=&past=true
  */
 exports.listRequests = async (req, res) => {
   try {
+    const role = req.user?.role;
+    const isStudent = role === "Student";
+
     const status = req.query.status;
     const type = req.query.type;
     const past = String(req.query.past || "") === "true";
 
     const q = {};
 
-    const role = String(req.user?.role || "Student");
-    if (role === "Student") q.userId = req.user?.id;
+    // Critical: students must never see other users' requests.
+    if (isStudent) {
+      q.userId = req.user?.id;
+    } else if (String(req.query.mine || "") === "true") {
+      q.userId = req.user?.id;
+    }
 
     if (status) q.status = status;
     if (type) q.type = type;
 
+    // Past Meetings filter: MEET where Completed (you can enhance later).
     if (past) {
       q.type = "MEET";
       q.status = { $in: ["Completed"] };
     }
 
     const items = await CounselingRequest.find(q).sort({ createdAt: -1 }).lean();
-
     return res.json({ items: items.map(formatRequestLean) });
   } catch (err) {
     console.error("listRequests error:", err);
@@ -150,6 +136,7 @@ exports.getRequest = async (req, res) => {
 
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
+    // student can only view own; counselor/admin can view all (keep simple now)
     const role = req.user?.role;
     const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
     if (!isPrivileged && String(doc.userId) !== String(req.user?.id)) {
@@ -164,7 +151,7 @@ exports.getRequest = async (req, res) => {
 };
 
 /**
- * Student: Cancel pending request
+ * Student: Cancel pending request (optional)
  * PATCH /api/counseling/requests/:id/cancel
  */
 exports.cancelRequest = async (req, res) => {
@@ -178,10 +165,7 @@ exports.cancelRequest = async (req, res) => {
       return res.status(403).json({ message: "Forbidden." });
     }
     if (doc.status !== "Pending") {
-      return res.status(400).json({
-        code: "INVALID_STATUS",
-        message: "Only pending requests can be cancelled.",
-      });
+      return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be cancelled." });
     }
 
     doc.status = "Cancelled";
@@ -207,12 +191,10 @@ exports.approveRequest = async (req, res) => {
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
     if (doc.status !== "Pending") {
-      return res.status(400).json({
-        code: "INVALID_STATUS",
-        message: "Only pending requests can be approved.",
-      });
+      return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be approved." });
     }
 
+    // If MEET, allow attaching meetingLink/location
     if (doc.type === "MEET") {
       if (doc.sessionType === "Online" && meetingLink) doc.meetingLink = String(meetingLink).trim();
       if (doc.sessionType === "In-person" && location) doc.location = String(location).trim();
@@ -242,10 +224,7 @@ exports.disapproveRequest = async (req, res) => {
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
     if (doc.status !== "Pending") {
-      return res.status(400).json({
-        code: "INVALID_STATUS",
-        message: "Only pending requests can be disapproved.",
-      });
+      return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be disapproved." });
     }
 
     doc.status = "Disapproved";
@@ -307,6 +286,8 @@ exports.replyToAsk = async (req, res) => {
 
     doc.counselorReply = String(reply).trim();
     doc.repliedAt = new Date();
+
+    // optional: treat reply as approval
     if (doc.status === "Pending") doc.status = "Approved";
 
     await doc.save();
@@ -318,45 +299,40 @@ exports.replyToAsk = async (req, res) => {
   }
 };
 
-const THREAD_STATUS_ALLOWED = new Set([
-  "NEW",
-  "UNDER_REVIEW",
-  "APPOINTMENT_REQUIRED",
-  "SCHEDULED",
-  "IN_SESSION",
-  "WAITING_ON_STUDENT",
-  "FOLLOW_UP_REQUIRED",
-  "COMPLETED",
-  "CLOSED",
-  "URGENT",
-  "CRISIS",
-]);
-
 /**
- * Admin/Counselor: Set ASK thread status
+ * Admin/Counselor: Set ASK thread status (NEW, UNDER_REVIEW, ...)
  * PATCH /api/counseling/admin/requests/:id/thread-status
- *
- * Accepts either { threadStatus: "..." } or { status: "..." }.
  */
 exports.setAskThreadStatus = async (req, res) => {
   try {
-    const { id } = req.params;
-    const incoming = req.body?.threadStatus ?? req.body?.status;
-    const threadStatus = incoming ? String(incoming).trim() : "";
+    const id = req.params.id;
+    const { threadStatus } = req.body || {};
 
-    if (!threadStatus || !THREAD_STATUS_ALLOWED.has(threadStatus)) {
+    const ALLOWED = new Set([
+      "NEW",
+      "UNDER_REVIEW",
+      "APPOINTMENT_REQUIRED",
+      "SCHEDULED",
+      "IN_SESSION",
+      "WAITING_ON_STUDENT",
+      "FOLLOW_UP_REQUIRED",
+      "COMPLETED",
+      "CLOSED",
+      "URGENT",
+      "CRISIS",
+    ]);
+
+    if (!threadStatus || !ALLOWED.has(threadStatus)) {
       return res.status(400).json({
         code: "INVALID_THREAD_STATUS",
         message: "Invalid threadStatus.",
       });
     }
 
-    const role = req.user?.role;
-    const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
-    if (!isPrivileged) return res.status(403).json({ message: "Forbidden." });
-
     const doc = await CounselingRequest.findById(id);
-    if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
+    if (!doc) {
+      return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
+    }
 
     if (doc.type !== "ASK") {
       return res.status(400).json({
@@ -365,11 +341,24 @@ exports.setAskThreadStatus = async (req, res) => {
       });
     }
 
+    // Role check (match your roles)
+    const role = req.user?.role;
+    const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
+    if (!isPrivileged) {
+      return res.status(403).json({ message: "Forbidden." });
+    }
+
+    // Optional: restrict internal statuses
+    // if ((threadStatus === "URGENT" || threadStatus === "CRISIS") && role !== "Counselor") {
+    //   return res.status(403).json({ message: "Only Counselor can set URGENT/CRISIS." });
+    // }
+
     doc.threadStatus = threadStatus;
     doc.threadStatusUpdatedAt = new Date();
     doc.threadStatusUpdatedBy = req.user?.id;
 
     await doc.save();
+
     return res.json(formatRequest(doc));
   } catch (err) {
     console.error("setAskThreadStatus error:", err);
@@ -377,30 +366,35 @@ exports.setAskThreadStatus = async (req, res) => {
   }
 };
 
+
 /**
  * List counselors (for booking)
  * GET /api/counseling/counselors
  */
 exports.listCounselors = async (req, res) => {
   try {
-    const users = await User.find({ role: "Counselor" })
-      .select("fullName counselorCode specialty")
+    const users = await User.find({
+      role: "Counselor",
+      counselorCode: { $exists: true, $ne: "" },
+    })
+      .select("_id fullName counselorCode specialty role")
       .sort({ fullName: 1 })
       .lean();
 
-    const items = users.map((u) => ({
-      id: u._id,
-      fullName: u.fullName,
-      counselorCode: u.counselorCode || `C-${String(u._id).slice(-4).toUpperCase()}`,
-      specialty: Array.isArray(u.specialty) ? u.specialty : [],
-    }));
-
-    return res.json({ items });
+    return res.json({
+      items: users.map((u) => ({
+        id: u.counselorCode, // ✅ "C-101"
+        name: u.fullName,
+        specialty: u.specialty || [],
+        role: u.role,
+      })),
+    });
   } catch (err) {
     console.error("listCounselors error:", err);
     return res.status(500).json({ message: "Server error." });
   }
 };
+
 
 /**
  * Get counselor availability for a date
@@ -419,12 +413,12 @@ exports.getAvailability = async (req, res) => {
       return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date format. Use YYYY-MM-DD." });
     }
 
-    const d = new Date(`${date}T00:00:00.000Z`);
+    // Weekend check (stable for YYYY-MM-DD)
+    const d = new Date(date + "T00:00:00.000Z");
     if (Number.isNaN(d.getTime())) {
       return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date." });
     }
-
-    const day = d.getUTCDay();
+    const day = d.getUTCDay(); // 0 Sun ... 6 Sat
     if (day === 0 || day === 6) {
       return res.status(400).json({ code: "INVALID_DATE", message: "Weekends are not allowed." });
     }
@@ -432,6 +426,7 @@ exports.getAvailability = async (req, res) => {
     const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
     const allSlots = generateSlots(workHours.start, workHours.end, workHours.stepMin);
 
+    // ✅ If counselorId is provided, compute for that counselor only (based on bookings)
     if (counselorId) {
       const booked = await CounselingRequest.find({
         type: "MEET",
@@ -448,10 +443,15 @@ exports.getAvailability = async (req, res) => {
         date,
         counselorId,
         workHours,
-        slots: allSlots.map((t) => (bookedTimes.has(t) ? { time: t, enabled: false, reason: "Booked" } : { time: t, enabled: true })),
+        slots: allSlots.map((t) => {
+          if (bookedTimes.has(t)) return { time: t, enabled: false, reason: "Booked" };
+          return { time: t, enabled: true };
+        }),
       });
     }
 
+    // ✅ No counselorId provided: "any counselor" availability
+    // Load counselor roster from Users (must have counselorCode)
     const counselors = await User.find({
       role: "Counselor",
       counselorCode: { $exists: true, $ne: "" },
@@ -468,6 +468,7 @@ exports.getAvailability = async (req, res) => {
       });
     }
 
+    // Load bookings for the date (any counselor)
     const bookings = await CounselingRequest.find({
       type: "MEET",
       date,
@@ -476,6 +477,7 @@ exports.getAvailability = async (req, res) => {
       .select("time counselorId")
       .lean();
 
+    // Map: time -> set(booked counselorIds)
     const bookedMap = new Map();
     for (const b of bookings) {
       const t = b.time;
@@ -484,13 +486,22 @@ exports.getAvailability = async (req, res) => {
       bookedMap.get(t).add(cId);
     }
 
-    const roster = counselors.map((c) => ({ id: c.counselorCode, name: c.fullName }));
+    const roster = counselors.map((c) => ({
+      id: c.counselorCode, // must match CounselingRequest.counselorId
+      name: c.fullName,
+    }));
 
     const slots = allSlots.map((t) => {
       const bookedSet = bookedMap.get(t) || new Set();
       const available = roster.filter((c) => !bookedSet.has(c.id));
+
       if (available.length === 0) return { time: t, enabled: false, reason: "Booked" };
-      return { time: t, enabled: true, availableCounselors: available };
+
+      return {
+        time: t,
+        enabled: true,
+        availableCounselors: available, // useful for frontend auto-pick
+      };
     });
 
     return res.json({ date, counselorId: null, workHours, slots });
@@ -499,6 +510,24 @@ exports.getAvailability = async (req, res) => {
     return res.status(500).json({ message: "Server error." });
   }
 };
+
+const THREAD_STATUS_ALLOWED = new Set([
+  "NEW",
+  "UNDER_REVIEW",
+  "APPOINTMENT_REQUIRED",
+  "SCHEDULED",
+  "IN_SESSION",
+  "WAITING_ON_STUDENT",
+  "FOLLOW_UP_REQUIRED",
+  "COMPLETED",
+  "CLOSED",
+  "URGENT",
+  "CRISIS",
+]);
+
+
+
+
 
 // ---------- local helpers for availability ----------
 function toMinutes(hhmm) {
@@ -516,46 +545,46 @@ function generateSlots(startHHMM, endHHMM, stepMin) {
   const start = toMinutes(startHHMM);
   const end = toMinutes(endHHMM);
   const slots = [];
-  for (let t = start; t <= end; t += stepMin) slots.push(toHHMM(t));
+  for (let t = start; t <= end; t += stepMin) {
+    slots.push(toHHMM(t));
+  }
   return slots;
 }
 
-// ---------- response helpers ----------
+
+// ---------- helpers ----------
 function formatRequest(doc) {
-  const o = doc?.toObject ? doc.toObject() : doc;
+  const o = doc.toObject ? doc.toObject() : doc;
   return formatRequestLean(o);
 }
 
 function formatRequestLean(o) {
   return {
-    id: o?._id,
-    userId: o?.userId,
-    type: o?.type,
-    status: o?.status,
-    createdAt: o?.createdAt,
-    updatedAt: o?.updatedAt,
+    id: o._id,
+    userId: o.userId,
+    type: o.type,
+    status: o.status,
+    createdAt: o.createdAt,
+    updatedAt: o.updatedAt,
 
-    topic: o?.topic,
-    message: o?.message,
-    anonymous: o?.anonymous,
-    counselorReply: o?.counselorReply,
-    repliedAt: o?.repliedAt,
+    topic: o.topic,
+    message: o.message,
+    anonymous: o.anonymous,
+    counselorReply: o.counselorReply,
+    repliedAt: o.repliedAt,
 
-    sessionType: o?.sessionType,
-    reason: o?.reason,
-    date: o?.date,
-    time: o?.time,
-    counselorId: o?.counselorId,
-    notes: o?.notes,
+    sessionType: o.sessionType,
+    reason: o.reason,
+    date: o.date,
+    time: o.time,
+    counselorId: o.counselorId,
+    notes: o.notes,
 
-    approvedBy: o?.approvedBy,
-    disapprovalReason: o?.disapprovalReason,
-    meetingLink: o?.meetingLink,
-    location: o?.location,
-    completedAt: o?.completedAt,
-
-    threadStatus: o?.threadStatus,
-    threadStatusUpdatedAt: o?.threadStatusUpdatedAt,
-    threadStatusUpdatedBy: o?.threadStatusUpdatedBy,
+    approvedBy: o.approvedBy,
+    disapprovalReason: o.disapprovalReason,
+    meetingLink: o.meetingLink,
+    location: o.location,
+    completedAt: o.completedAt,
   };
 }
+

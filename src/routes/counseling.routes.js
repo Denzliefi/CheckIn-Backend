@@ -21,7 +21,7 @@ router.get("/counselors", protect, counseling.listCounselors);
 router.get(
   "/admin/requests",
   protect,
-  requireRole("Admin", "Counselor", "Student"),
+  requireRole("Admin", "Counselor"),
   counseling.listRequests
 );
 
@@ -36,28 +36,28 @@ router.patch(
 router.patch(
   "/admin/requests/:id/approve",
   protect,
-  requireRole("Admin", "Counselor", "Student"),
+  requireRole("Admin", "Counselor"),
   counseling.approveRequest
 );
 
 router.patch(
   "/admin/requests/:id/disapprove",
   protect,
-  requireRole("Admin", "Counselor", "Student"),
+  requireRole("Admin", "Counselor"),
   counseling.disapproveRequest
 );
 
 router.patch(
   "/admin/requests/:id/complete",
   protect,
-  requireRole("Admin", "Counselor", "Student"),
+  requireRole("Admin", "Counselor"),
   counseling.completeRequest
 );
 
 router.patch(
   "/admin/requests/:id/reply",
   protect,
-  requireRole("Admin", "Counselor", "Student"),
+  requireRole("Admin", "Counselor"),
   counseling.replyToAsk
 );
 
