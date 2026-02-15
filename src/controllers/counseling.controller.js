@@ -1,14 +1,136 @@
 const mongoose = require("mongoose");
+const { DateTime } = require("luxon");
+
 const CounselingRequest = require("../models/CounselingRequest");
-const { validateMeetRules } = require("../utils/counselingValidation");
 const User = require("../models/User.model");
+const { validateMeetRules, PH_TZ } = require("../utils/counselingValidation");
+const { generateTimeSlots } = require("../utils/availability");
+
+/* =========================
+   HELPERS
+========================= */
+function formatRequestLean(doc) {
+  if (!doc) return null;
+  const id = String(doc._id || doc.id || "");
+
+  const counselorName =
+    doc.counselorName ||
+    (doc.counselorId && doc.counselorId.fullName) ||
+    (doc.counselorId && doc.counselorId.firstName
+      ? `${doc.counselorId.firstName} ${doc.counselorId.lastName || ""}`.trim()
+      : "");
+
+  return {
+    id,
+    _id: id,
+    userId: doc.userId,
+    type: doc.type,
+    status: doc.status,
+    threadStatus: doc.threadStatus,
+    topic: doc.topic,
+    message: doc.message,
+    anonymous: !!doc.anonymous,
+    counselorReply: doc.counselorReply,
+    repliedAt: doc.repliedAt,
+
+    sessionType: doc.sessionType,
+    reason: doc.reason,
+    date: doc.date,
+    time: doc.time,
+    counselorId: doc.counselorId?._id ? String(doc.counselorId._id) : (doc.counselorId ? String(doc.counselorId) : ""),
+    counselorName: counselorName || "",
+    notes: doc.notes,
+
+    approvedBy: doc.approvedBy,
+    disapprovalReason: doc.disapprovalReason,
+    meetingLink: doc.meetingLink,
+    location: doc.location,
+
+    completedAt: doc.completedAt,
+    cancelledAt: doc.cancelledAt,
+
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+function formatRequest(doc) {
+  if (!doc) return null;
+  return formatRequestLean(doc.toObject ? doc.toObject({ virtuals: false }) : doc);
+}
+
+function phDateOf(jsDate) {
+  if (!jsDate) return null;
+  const dt = DateTime.fromJSDate(jsDate, { zone: PH_TZ });
+  if (!dt.isValid) return null;
+  return dt.toISODate(); // YYYY-MM-DD
+}
+
 /**
- * Student: Create ASK
- * POST /api/counseling/requests/ask
+ * If a meeting was cancelled on the same calendar date as the meeting date,
+ * we keep the slot blocked (prevents last-minute cancellations freeing the slot).
  */
+function isSameDayCancellation(doc) {
+  if (!doc || doc.status !== "Cancelled") return false;
+  if (!doc.cancelledAt || !doc.date) return false;
+
+  const cancelledDate = phDateOf(new Date(doc.cancelledAt));
+  return cancelledDate === doc.date;
+}
+
+function buildSlotConflictQuery({ counselorId, date, time }) {
+  return {
+    type: "MEET",
+    counselorId,
+    date,
+    time,
+    $or: [
+      { status: { $in: ["Pending", "Approved"] } },
+      // Same-day cancelled keeps slot blocked
+      { status: "Cancelled", cancelledAt: { $exists: true } },
+    ],
+  };
+}
+
+/**
+ * Enforce: only 1 active (Pending/Approved) MEET per week per student.
+ */
+async function enforceOneActiveMeetPerWeek({ userId, date }) {
+  const dt = DateTime.fromISO(date, { zone: PH_TZ });
+  if (!dt.isValid) return { ok: true };
+
+  const weekStart = dt.startOf("week"); // Luxon default: Monday as start (ISO)
+  const weekEnd = dt.endOf("week");
+
+  const start = weekStart.toISODate();
+  const end = weekEnd.toISODate();
+
+  const existing = await CounselingRequest.findOne({
+    userId,
+    type: "MEET",
+    status: { $in: ["Pending", "Approved"] },
+    date: { $gte: start, $lte: end },
+  })
+    .select("_id date time status")
+    .lean();
+
+  if (existing) {
+    return {
+      ok: false,
+      code: "ONE_ACTIVE_MEET_PER_WEEK",
+      message: "You can only have 1 pending/approved counseling session per week.",
+    };
+  }
+
+  return { ok: true };
+}
+
+/* =========================
+   STUDENT: ASK
+========================= */
 exports.createAsk = async (req, res) => {
   try {
-    const userId = req.user?.id; // protect middleware should set req.user
+    const userId = req.user?.id;
     const { topic, message, anonymous = true } = req.body || {};
 
     if (!topic || !message) {
@@ -22,6 +144,7 @@ exports.createAsk = async (req, res) => {
       topic: String(topic).trim(),
       message: String(message).trim(),
       anonymous: !!anonymous,
+      threadStatus: "NEW",
     });
 
     return res.status(201).json(formatRequest(doc));
@@ -31,16 +154,15 @@ exports.createAsk = async (req, res) => {
   }
 };
 
-/**
- * Student: Create MEET
- * POST /api/counseling/requests/meet
- */
+/* =========================
+   STUDENT: MEET
+========================= */
 exports.createMeet = async (req, res) => {
   try {
     const userId = req.user?.id;
     const { sessionType, reason, date, time, counselorId, notes } = req.body || {};
 
-    if (!sessionType || !reason || !date || !time) {
+    if (!sessionType || !reason || !date || !time || !counselorId) {
       return res.status(400).json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
     }
 
@@ -49,54 +171,37 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
-    // counselorId is optional: if missing, auto-assign the first available counselor for the slot
-    let counselor = counselorId ? String(counselorId).trim() : "";
-
-    if (!counselor) {
-      const counselors = await User.find({
-        role: "Counselor",
-        counselorCode: { $exists: true, $ne: "" },
-      })
-        .select("counselorCode fullName")
-        .sort({ fullName: 1 })
-        .lean();
-
-      for (const c of counselors) {
-        const code = String(c.counselorCode || "").trim();
-        if (!code) continue;
-
-        const conflict = await CounselingRequest.findOne({
-          type: "MEET",
-          counselorId: code,
-          date,
-          time,
-          status: { $in: ["Pending", "Approved"] },
-        }).lean();
-
-        if (!conflict) {
-          counselor = code;
-          break;
-        }
-      }
-
-      if (!counselor) {
-        return res.status(409).json({
-          code: "NO_COUNSELOR_AVAILABLE",
-          message: "No counselors available for the selected date/time.",
-        });
-      }
+    const oneWeek = await enforceOneActiveMeetPerWeek({ userId, date });
+    if (!oneWeek.ok) {
+      return res.status(409).json({ code: oneWeek.code, message: oneWeek.message });
     }
 
-    // slot conflict check (Pending/Approved MEET)
-    const conflict = await CounselingRequest.findOne({
+    const counselor = String(counselorId).trim();
+    if (!mongoose.isValidObjectId(counselor)) {
+      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
+    }
+
+    const counselorExists = await User.exists({ _id: counselor, role: "Counselor" });
+    if (!counselorExists) {
+      return res.status(404).json({ code: "COUNSELOR_NOT_FOUND", message: "Selected counselor not found." });
+    }
+
+    // conflict check, also blocks same-day cancellations
+    const conflictDocs = await CounselingRequest.find({
       type: "MEET",
       counselorId: counselor,
       date,
       time,
-      status: { $in: ["Pending", "Approved"] },
-    }).lean();
+      status: { $in: ["Pending", "Approved", "Cancelled"] },
+    })
+      .select("status cancelledAt date")
+      .lean();
 
-    if (conflict) {
+    const taken =
+      conflictDocs.some((d) => d.status === "Pending" || d.status === "Approved") ||
+      conflictDocs.some((d) => isSameDayCancellation(d));
+
+    if (taken) {
       return res.status(409).json({ code: "SLOT_TAKEN", message: "Time slot already booked." });
     }
 
@@ -119,47 +224,31 @@ exports.createMeet = async (req, res) => {
   }
 };
 
-/**
- * Student: List my requests
- * GET /api/counseling/requests?mine=true&status=&type=&past=true
- */
+/* =========================
+   STUDENT: LIST MY REQUESTS (default)
+========================= */
 exports.listRequests = async (req, res) => {
   try {
-    const mine = String(req.query.mine || "") === "true";
     const status = req.query.status;
     const type = req.query.type;
-    const past = String(req.query.past || "") === "true";
+
+    const role = String(req.user?.role || "");
+    const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
 
     const q = {};
 
+    // Students: ONLY own
+    if (!isPrivileged) q.userId = req.user?.id;
 
-    const role = String(req.user?.role || "");
-    const counselorCode = String(req.user?.counselorCode || "");
-    const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
+    // Counselors: by default see assigned to them (their user _id)
+    if (role === "Counselor") q.counselorId = req.user?.id;
 
-    // ✅ Default scoping: Students can ONLY see their own requests (even if mine=false)
-    if (!isPrivileged) {
-      q.userId = req.user?.id;
-    } else if (role === "Counselor" && counselorCode) {
-      // ✅ Counselors (later dashboard) should only see requests assigned to them by default
-      // You can expand this later for admin views.
-      q.counselorId = counselorCode;
-    }
-
-    if (mine) q.userId = req.user?.id;
     if (status) q.status = status;
     if (type) q.type = type;
 
-    // Past Meetings filter: MEET where Completed OR date/time already passed
-    // Minimal version: just Completed; you can enhance later.
-    if (past) {
-      q.type = "MEET";
-      q.status = { $in: ["Completed"] };
-    }
-
     const items = await CounselingRequest.find(q)
       .sort({ createdAt: -1 })
-      .populate("counselorId", "fullName role")
+      .populate({ path: "counselorId", select: "firstName lastName fullName role" })
       .lean();
 
     return res.json({ items: items.map(formatRequestLean) });
@@ -169,21 +258,23 @@ exports.listRequests = async (req, res) => {
   }
 };
 
-/**
- * Student: Get request details
- * GET /api/counseling/requests/:id
- */
 exports.getRequest = async (req, res) => {
   try {
     const id = req.params.id;
-    const doc = await CounselingRequest.findById(id).populate("counselorId", "fullName role").lean();
+    const doc = await CounselingRequest.findById(id)
+      .populate({ path: "counselorId", select: "firstName lastName fullName role" })
+      .lean();
 
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
-    // student can only view own; counselor/admin can view all (keep simple now)
-    const role = req.user?.role;
+    const role = String(req.user?.role || "");
     const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
+
     if (!isPrivileged && String(doc.userId) !== String(req.user?.id)) {
+      return res.status(403).json({ message: "Forbidden." });
+    }
+
+    if (role === "Counselor" && String(doc.counselorId?._id || doc.counselorId) !== String(req.user?.id)) {
       return res.status(403).json({ message: "Forbidden." });
     }
 
@@ -194,10 +285,6 @@ exports.getRequest = async (req, res) => {
   }
 };
 
-/**
- * Student: Cancel pending request (optional)
- * PATCH /api/counseling/requests/:id/cancel
- */
 exports.cancelRequest = async (req, res) => {
   try {
     const id = req.params.id;
@@ -208,11 +295,13 @@ exports.cancelRequest = async (req, res) => {
     if (String(doc.userId) !== String(req.user?.id)) {
       return res.status(403).json({ message: "Forbidden." });
     }
-    if (doc.status !== "Pending") {
-      return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be cancelled." });
+
+    if (doc.status !== "Pending" && doc.status !== "Approved") {
+      return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending/approved requests can be cancelled." });
     }
 
     doc.status = "Cancelled";
+    doc.cancelledAt = new Date();
     await doc.save();
 
     return res.json(formatRequest(doc));
@@ -222,10 +311,92 @@ exports.cancelRequest = async (req, res) => {
   }
 };
 
-/**
- * Admin/Counselor: Approve
- * PATCH /api/counseling/admin/requests/:id/approve
- */
+/* =========================
+   COUNSELOR LIST (for booking)
+========================= */
+exports.listCounselors = async (req, res) => {
+  try {
+    const users = await User.find({ role: "Counselor" })
+      .select("_id firstName lastName fullName role")
+      .sort({ fullName: 1, lastName: 1, firstName: 1 })
+      .lean();
+
+    return res.json({
+      items: users.map((u) => ({
+        id: String(u._id),
+        name: u.fullName || `${u.firstName || ""} ${u.lastName || ""}`.trim() || "Counselor",
+      })),
+    });
+  } catch (err) {
+    console.error("listCounselors error:", err);
+    return res.status(500).json({ message: "Server error." });
+  }
+};
+
+/* =========================
+   AVAILABILITY
+   GET /api/counseling/availability?date=YYYY-MM-DD&counselorId=<userId>
+========================= */
+exports.getAvailability = async (req, res) => {
+  try {
+    const date = String(req.query.date || "").trim();
+    const counselorId = String(req.query.counselorId || "").trim();
+
+    if (!date) {
+      return res.status(400).json({ code: "MISSING_DATE", message: "date is required (YYYY-MM-DD)." });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date format. Use YYYY-MM-DD." });
+    }
+
+    const rule = validateMeetRules({ date, time: "08:00" }); // validate date/weekend/holiday
+    if (!rule.ok && rule.code === "INVALID_DATE") {
+      return res.status(400).json({ code: rule.code, message: rule.message });
+    }
+
+    if (!counselorId || !mongoose.isValidObjectId(counselorId)) {
+      return res.status(400).json({ code: "INVALID_COUNSELOR", message: "counselorId is required." });
+    }
+
+    const counselorExists = await User.exists({ _id: counselorId, role: "Counselor" });
+    if (!counselorExists) {
+      return res.status(404).json({ code: "COUNSELOR_NOT_FOUND", message: "Selected counselor not found." });
+    }
+
+    const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
+    const allSlots = generateTimeSlots(workHours.start, workHours.end, workHours.stepMin);
+
+    const bookings = await CounselingRequest.find({
+      type: "MEET",
+      counselorId,
+      date,
+      status: { $in: ["Pending", "Approved", "Cancelled"] },
+    })
+      .select("time status cancelledAt date")
+      .lean();
+
+    const blocked = new Set();
+    for (const b of bookings) {
+      if (b.status === "Pending" || b.status === "Approved") blocked.add(b.time);
+      else if (isSameDayCancellation(b)) blocked.add(b.time);
+    }
+
+    return res.json({
+      date,
+      counselorId,
+      workHours,
+      slots: allSlots.map((t) => (blocked.has(t) ? { time: t, enabled: false, reason: "Booked" } : { time: t, enabled: true })),
+    });
+  } catch (err) {
+    console.error("getAvailability error:", err);
+    return res.status(500).json({ message: "Server error." });
+  }
+};
+
+/* =========================
+   ADMIN / COUNSELOR ACTIONS
+   (kept from your existing workflow)
+========================= */
 exports.approveRequest = async (req, res) => {
   try {
     const id = req.params.id;
@@ -238,7 +409,6 @@ exports.approveRequest = async (req, res) => {
       return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be approved." });
     }
 
-    // If MEET, allow attaching meetingLink/location
     if (doc.type === "MEET") {
       if (doc.sessionType === "Online" && meetingLink) doc.meetingLink = String(meetingLink).trim();
       if (doc.sessionType === "In-person" && location) doc.location = String(location).trim();
@@ -255,10 +425,6 @@ exports.approveRequest = async (req, res) => {
   }
 };
 
-/**
- * Admin/Counselor: Disapprove
- * PATCH /api/counseling/admin/requests/:id/disapprove
- */
 exports.disapproveRequest = async (req, res) => {
   try {
     const id = req.params.id;
@@ -282,10 +448,6 @@ exports.disapproveRequest = async (req, res) => {
   }
 };
 
-/**
- * Admin/Counselor: Complete MEET
- * PATCH /api/counseling/admin/requests/:id/complete
- */
 exports.completeRequest = async (req, res) => {
   try {
     const id = req.params.id;
@@ -308,10 +470,6 @@ exports.completeRequest = async (req, res) => {
   }
 };
 
-/**
- * Admin/Counselor: Reply to ASK
- * PATCH /api/counseling/admin/requests/:id/reply
- */
 exports.replyToAsk = async (req, res) => {
   try {
     const id = req.params.id;
@@ -331,7 +489,6 @@ exports.replyToAsk = async (req, res) => {
     doc.counselorReply = String(reply).trim();
     doc.repliedAt = new Date();
 
-    // optional: treat reply as approval
     if (doc.status === "Pending") doc.status = "Approved";
 
     await doc.save();
@@ -343,10 +500,6 @@ exports.replyToAsk = async (req, res) => {
   }
 };
 
-/**
- * Admin/Counselor: Set ASK thread status (NEW, UNDER_REVIEW, ...)
- * PATCH /api/counseling/admin/requests/:id/thread-status
- */
 exports.setAskThreadStatus = async (req, res) => {
   try {
     const id = req.params.id;
@@ -367,261 +520,24 @@ exports.setAskThreadStatus = async (req, res) => {
     ]);
 
     if (!threadStatus || !ALLOWED.has(threadStatus)) {
-      return res.status(400).json({
-        code: "INVALID_THREAD_STATUS",
-        message: "Invalid threadStatus.",
-      });
+      return res.status(400).json({ code: "INVALID_THREAD_STATUS", message: "Invalid threadStatus." });
     }
 
     const doc = await CounselingRequest.findById(id);
-    if (!doc) {
-      return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
-    }
+    if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
     if (doc.type !== "ASK") {
-      return res.status(400).json({
-        code: "INVALID_TYPE",
-        message: "Only ASK requests can have thread statuses.",
-      });
+      return res.status(400).json({ code: "INVALID_TYPE", message: "Only ASK requests can have thread statuses." });
     }
-
-    // Role check (match your roles)
-    const role = req.user?.role;
-    const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
-    if (!isPrivileged) {
-      return res.status(403).json({ message: "Forbidden." });
-    }
-
-    // Optional: restrict internal statuses
-    // if ((threadStatus === "URGENT" || threadStatus === "CRISIS") && role !== "Counselor") {
-    //   return res.status(403).json({ message: "Only Counselor can set URGENT/CRISIS." });
-    // }
 
     doc.threadStatus = threadStatus;
     doc.threadStatusUpdatedAt = new Date();
     doc.threadStatusUpdatedBy = req.user?.id;
 
     await doc.save();
-
     return res.json(formatRequest(doc));
   } catch (err) {
     console.error("setAskThreadStatus error:", err);
     return res.status(500).json({ message: "Server error." });
   }
 };
-
-
-/**
- * List counselors (for booking)
- * GET /api/counseling/counselors
- */
-exports.listCounselors = async (req, res) => {
-  try {
-    // ✅ Counselors are in the same Users collection; role is the only differentiator
-    const users = await User.find({ role: "Counselor" })
-      .select("_id fullName role")
-      .sort({ fullName: 1 })
-      .lean();
-
-    return res.json({
-      items: users.map((u) => ({
-        id: String(u._id), // ✅ counselor User _id (ObjectId)
-        name: u.fullName,
-        role: u.role,
-      })),
-    });
-  } catch (err) {
-    console.error("listCounselors error:", err);
-    return res.status(500).json({ message: "Server error." });
-  }
-};
-
-
-/**
- * Get counselor availability for a date
- * GET /api/counseling/availability?date=YYYY-MM-DD&counselorId=<counselorUserId>(optional)
- */
-exports.getAvailability = async (req, res) => {
-  try {
-    const date = String(req.query.date || "").trim();
-    const counselorId = req.query.counselorId ? String(req.query.counselorId).trim() : "";
-
-    if (!date) {
-      return res.status(400).json({ code: "MISSING_DATE", message: "date is required (YYYY-MM-DD)." });
-    }
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date format. Use YYYY-MM-DD." });
-    }
-
-    // Weekend check (stable for YYYY-MM-DD)
-    const d = new Date(date + "T00:00:00.000Z");
-    if (Number.isNaN(d.getTime())) {
-      return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date." });
-    }
-    const day = d.getUTCDay(); // 0 Sun ... 6 Sat
-    if (day === 0 || day === 6) {
-      return res.status(400).json({ code: "INVALID_DATE", message: "Weekends are not allowed." });
-    }
-
-    const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
-    const allSlots = generateSlots(workHours.start, workHours.end, workHours.stepMin);
-
-    // ✅ If counselorId is provided, compute for that counselor only (based on bookings)
-    if (counselorId) {
-      if (!mongoose.isValidObjectId(counselorId)) {
-        return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
-      }
-
-      const booked = await CounselingRequest.find({
-        type: "MEET",
-        counselorId: counselorId,
-        date,
-        status: { $in: ["Pending", "Approved"] },
-      })
-        .select("time")
-        .lean();
-
-      const bookedTimes = new Set(booked.map((b) => b.time));
-
-      return res.json({
-        date,
-        counselorId,
-        workHours,
-        slots: allSlots.map((t) => {
-          if (bookedTimes.has(t)) return { time: t, enabled: false, reason: "Booked" };
-          return { time: t, enabled: true };
-        }),
-      });
-    }
-
-    // ✅ No counselorId provided: "any counselor" availability
-    // Load counselor roster from Users (role only)
-    const counselors = await User.find({ role: "Counselor" })
-      .select("fullName")
-      .lean();
-
-    if (counselors.length === 0) {
-      return res.json({
-        date,
-        counselorId: null,
-        workHours,
-        slots: allSlots.map((t) => ({ time: t, enabled: false, reason: "No counselors available" })),
-      });
-    }
-
-    // Load bookings for the date (any counselor)
-    const bookings = await CounselingRequest.find({
-      type: "MEET",
-      date,
-      status: { $in: ["Pending", "Approved"] },
-    })
-      .select("time counselorId")
-      .lean();
-
-    // Map: time -> set(booked counselorIds)
-    const bookedMap = new Map();
-    for (const b of bookings) {
-      const t = b.time;
-      const cId = String(b.counselorId || "");
-      if (!bookedMap.has(t)) bookedMap.set(t, new Set());
-      bookedMap.get(t).add(cId);
-    }
-
-    const roster = counselors.map((c) => ({
-      id: String(c._id), // must match CounselingRequest.counselorId
-      name: c.fullName,
-    }));
-
-    const slots = allSlots.map((t) => {
-      const bookedSet = bookedMap.get(t) || new Set();
-      const available = roster.filter((c) => !bookedSet.has(c.id));
-
-      if (available.length === 0) return { time: t, enabled: false, reason: "Booked" };
-
-      return {
-        time: t,
-        enabled: true,
-        availableCounselors: available, // useful for frontend auto-pick
-      };
-    });
-
-    return res.json({ date, counselorId: null, workHours, slots });
-  } catch (err) {
-    console.error("getAvailability error:", err);
-    return res.status(500).json({ message: "Server error." });
-  }
-};
-
-// ---------- local helpers for availability ----------
-function toMinutes(hhmm) {
-  const [h, m] = String(hhmm).split(":").map((x) => parseInt(x, 10));
-  return h * 60 + m;
-}
-
-function toHHMM(mins) {
-  const h = String(Math.floor(mins / 60)).padStart(2, "0");
-  const m = String(mins % 60).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
-function generateSlots(startHHMM, endHHMM, stepMin) {
-  const start = toMinutes(startHHMM);
-  const end = toMinutes(endHHMM);
-  const slots = [];
-  for (let t = start; t <= end; t += stepMin) {
-    slots.push(toHHMM(t));
-  }
-  return slots;
-}
-
-
-// ---------- helpers ----------
-function formatRequest(doc) {
-  const o = doc.toObject ? doc.toObject() : doc;
-  return formatRequestLean(o);
-}
-
-function formatRequestLean(o) {
-  const counselorName =
-    (o?.counselorId && typeof o.counselorId === "object" && o.counselorId.fullName) ||
-    o?.counselorName ||
-    "";
-
-  const counselorId =
-    o?.counselorId && typeof o.counselorId === "object" && o.counselorId._id
-      ? String(o.counselorId._id)
-      : o?.counselorId
-      ? String(o.counselorId)
-      : "";
-
-  return {
-    id: o._id,
-    userId: o.userId,
-    type: o.type,
-    status: o.status,
-    createdAt: o.createdAt,
-    updatedAt: o.updatedAt,
-
-    topic: o.topic,
-    message: o.message,
-    anonymous: o.anonymous,
-    counselorReply: o.counselorReply,
-    repliedAt: o.repliedAt,
-
-    sessionType: o.sessionType,
-    reason: o.reason,
-    date: o.date,
-    time: o.time,
-    counselorId,
-    counselorName,
-    notes: o.notes,
-
-    approvedBy: o.approvedBy,
-    disapprovalReason: o.disapprovalReason,
-    meetingLink: o.meetingLink,
-    location: o.location,
-    completedAt: o.completedAt,
-  };
-}
-

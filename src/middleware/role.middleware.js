@@ -22,3 +22,14 @@ function requireRole(...allowedRoles) {
 }
 
 module.exports = { requireRole };
+
+exports.requireRole = (...allowed) => {
+  const allowedSet = new Set(allowed.map(String));
+  return (req, res, next) => {
+    const role = String(req.user?.role || "");
+    if (!role || !allowedSet.has(role)) {
+      return res.status(403).json({ message: "Forbidden." });
+    }
+    return next();
+  };
+};
