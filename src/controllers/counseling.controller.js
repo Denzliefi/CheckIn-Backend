@@ -48,10 +48,42 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
-    // optional: require counselorId for now; or auto assign later
-    const counselor = counselorId ? String(counselorId).trim() : null;
+    // counselorId is optional: if missing, auto-assign the first available counselor for the slot
+    let counselor = counselorId ? String(counselorId).trim() : "";
+
     if (!counselor) {
-      return res.status(400).json({ code: "MISSING_COUNSELOR", message: "Please select a counselor." });
+      const counselors = await User.find({
+        role: "Counselor",
+        counselorCode: { $exists: true, $ne: "" },
+      })
+        .select("counselorCode fullName")
+        .sort({ fullName: 1 })
+        .lean();
+
+      for (const c of counselors) {
+        const code = String(c.counselorCode || "").trim();
+        if (!code) continue;
+
+        const conflict = await CounselingRequest.findOne({
+          type: "MEET",
+          counselorId: code,
+          date,
+          time,
+          status: { $in: ["Pending", "Approved"] },
+        }).lean();
+
+        if (!conflict) {
+          counselor = code;
+          break;
+        }
+      }
+
+      if (!counselor) {
+        return res.status(409).json({
+          code: "NO_COUNSELOR_AVAILABLE",
+          message: "No counselors available for the selected date/time.",
+        });
+      }
     }
 
     // slot conflict check (Pending/Approved MEET)
@@ -92,27 +124,42 @@ exports.createMeet = async (req, res) => {
  */
 exports.listRequests = async (req, res) => {
   try {
+    const mine = String(req.query.mine || "") === "true";
     const status = req.query.status;
     const type = req.query.type;
     const past = String(req.query.past || "") === "true";
 
     const q = {};
-    const role = String(req.user?.role || "Student").toLowerCase();
 
-    // ✅ Students can ONLY list their own requests (no bypass via query params)
-    if (role === "student") {
+
+    const role = String(req.user?.role || "");
+    const counselorCode = String(req.user?.counselorCode || "");
+    const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
+
+    // ✅ Default scoping: Students can ONLY see their own requests (even if mine=false)
+    if (!isPrivileged) {
       q.userId = req.user?.id;
+    } else if (role === "Counselor" && counselorCode) {
+      // ✅ Counselors (later dashboard) should only see requests assigned to them by default
+      // You can expand this later for admin views.
+      q.counselorId = counselorCode;
     }
 
+    if (mine) q.userId = req.user?.id;
     if (status) q.status = status;
     if (type) q.type = type;
 
+    // Past Meetings filter: MEET where Completed OR date/time already passed
+    // Minimal version: just Completed; you can enhance later.
     if (past) {
       q.type = "MEET";
       q.status = { $in: ["Completed"] };
     }
 
-    const items = await CounselingRequest.find(q).sort({ createdAt: -1 }).lean();
+    const items = await CounselingRequest.find(q)
+      .sort({ createdAt: -1 })
+      .lean();
+
     return res.json({ items: items.map(formatRequestLean) });
   } catch (err) {
     console.error("listRequests error:", err);
