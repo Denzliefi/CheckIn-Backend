@@ -50,6 +50,16 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
+    // Enforce the same 1-hour slot rules as the UI (backend source of truth)
+    const time24 = String(time || "").trim();
+    const validSlots = new Set(generateSlots("08:00", "17:00", 60));
+    if (!validSlots.has(time24)) {
+      return res.status(400).json({ code: "INVALID_TIME", message: "Invalid time slot." });
+    }
+    if (time24 === "12:00") {
+      return res.status(400).json({ code: "LUNCH_BREAK", message: "Lunch break (12:00 PM) is not available." });
+    }
+
     // =========================
     // A) One active/pending request at a time
     // =========================
@@ -510,11 +520,8 @@ exports.getAvailability = async (req, res) => {
       return res.status(400).json({ code: "INVALID_DATE", message: "Weekends are not allowed." });
     }
 
-    const workHours = { start: "08:00", end: "17:00", stepMin: 30 };
-    const allSlots = (typeof generateTimeSlots === "function"
-      ? generateTimeSlots(workHours.start, workHours.end, workHours.stepMin)
-      : generateSlots(workHours.start, workHours.end, workHours.stepMin)
-    );
+    const workHours = { start: "08:00", end: "17:00", stepMin: 60 };
+    const allSlots = generateSlots(workHours.start, workHours.end, workHours.stepMin);
 
     // Same-day cancellation rule:
     // - Pending/Approved always block
@@ -559,6 +566,7 @@ exports.getAvailability = async (req, res) => {
         counselorId,
         workHours,
         slots: allSlots.map((t) => {
+          if (t === "12:00") return { time: t, enabled: false, reason: "Lunch break" };
           if (bookedTimes.has(t)) return { time: t, enabled: false, reason: "Booked" };
           return { time: t, enabled: true };
         }),
@@ -576,7 +584,7 @@ exports.getAvailability = async (req, res) => {
         date,
         counselorId: null,
         workHours,
-        slots: allSlots.map((t) => ({ time: t, enabled: false, reason: "No counselors available" })),
+        slots: allSlots.map((t) => (t === "12:00" ? { time: t, enabled: false, reason: "Lunch break" } : { time: t, enabled: false, reason: "No counselors available" })),
       });
     }
 
@@ -605,6 +613,7 @@ exports.getAvailability = async (req, res) => {
     }));
 
     const slots = allSlots.map((t) => {
+      if (t === "12:00") return { time: t, enabled: false, reason: "Lunch break" };
       const bookedSet = bookedMap.get(t) || new Set();
       const available = roster.filter((c) => !bookedSet.has(c.id));
 
@@ -675,7 +684,7 @@ function generateSlots(startHHMM, endHHMM, stepMin) {
   const start = toMinutes(startHHMM);
   const end = toMinutes(endHHMM);
   const slots = [];
-  for (let t = start; t <= end; t += stepMin) {
+  for (let t = start; t < end; t += stepMin) {
     slots.push(toHHMM(t));
   }
   return slots;
