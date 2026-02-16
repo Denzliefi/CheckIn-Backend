@@ -2,6 +2,7 @@ const CounselingRequest = require("../models/CounselingRequest");
 const { validateMeetRules } = require("../utils/counselingValidation");
 const { generateTimeSlots } = require("../utils/availability");
 const User = require("../models/User.model");
+const mongoose = require("mongoose");
 /**
  * Student: Create ASK
  * POST /api/counseling/requests/ask
@@ -49,32 +50,72 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
-    // counselorId is optional: if missing, auto-assign the first available counselor for the slot
-    let counselor = counselorId ? String(counselorId).trim() : "";
+    // =========================
+    // A) One active/pending request at a time
+    // =========================
+    // Block if there is any MEET with Pending OR Approved (not completed yet)
+    const active = await CounselingRequest.findOne({
+      userId,
+      type: "MEET",
+      status: { $in: ["Pending", "Approved"] },
+      $or: [{ completedAt: { $exists: false } }, { completedAt: null }],
+    })
+      .select("_id status date time")
+      .lean();
+
+    if (active) {
+      return res.status(409).json({
+        code: "HAS_ACTIVE_REQUEST",
+        message: "You already have an active request. Please wait until it is approved/disapproved (or completed) before booking again.",
+      });
+    }
+
+    // =========================
+    // B) One booking per week (Mon–Sun, Asia/Manila) based on the SESSION date
+    // =========================
+    const { weekStart, weekEnd } = getPHWeekRange(date);
+
+    const weekly = await CounselingRequest.findOne({
+      userId,
+      type: "MEET",
+      date: { $gte: weekStart, $lte: weekEnd },
+    })
+      .select("_id status date time")
+      .lean();
+
+    if (weekly) {
+      return res.status(409).json({
+        code: "WEEKLY_LIMIT",
+        message: "Weekly limit reached. You can only book one counseling session per week.",
+        meta: { weekStart, weekEnd },
+      });
+    }
+
+    // counselorId optional: if missing, auto-assign first available counselor for that slot
+    let counselor = counselorId ? toObjectIdOrEmpty(counselorId) : null;
 
     if (!counselor) {
-      const counselors = await User.find({
-        role: "Counselor",
-        counselorCode: { $exists: true, $ne: "" },
-      })
-        .select("counselorCode fullName")
-        .sort({ fullName: 1 })
+      const counselors = await User.find({ role: "Counselor" })
+        .select("_id firstName lastName fullName")
+        .sort({ fullName: 1, lastName: 1, firstName: 1 })
         .lean();
 
       for (const c of counselors) {
-        const code = String(c.counselorCode || "").trim();
-        if (!code) continue;
+        const cId = toObjectIdOrEmpty(c._id);
+        if (!cId) continue;
 
         const conflict = await CounselingRequest.findOne({
           type: "MEET",
-          counselorId: code,
+          counselorId: cId,
           date,
           time,
           status: { $in: ["Pending", "Approved"] },
-        }).lean();
+        })
+          .select("_id")
+          .lean();
 
         if (!conflict) {
-          counselor = code;
+          counselor = cId;
           break;
         }
       }
@@ -87,14 +128,16 @@ exports.createMeet = async (req, res) => {
       }
     }
 
-    // slot conflict check (Pending/Approved MEET)
+    // Slot conflict check (Pending/Approved)
     const conflict = await CounselingRequest.findOne({
       type: "MEET",
       counselorId: counselor,
       date,
       time,
       status: { $in: ["Pending", "Approved"] },
-    }).lean();
+    })
+      .select("_id")
+      .lean();
 
     if (conflict) {
       return res.status(409).json({ code: "SLOT_TAKEN", message: "Time slot already booked." });
@@ -115,9 +158,14 @@ exports.createMeet = async (req, res) => {
     return res.status(201).json(formatRequest(doc));
   } catch (err) {
     console.error("createMeet error:", err);
+    // Handle duplicate key from unique index (double booking race)
+    if (err && (err.code === 11000 || err.name === "MongoServerError")) {
+      return res.status(409).json({ code: "SLOT_TAKEN", message: "Time slot already booked." });
+    }
     return res.status(500).json({ message: "Server error." });
   }
 };
+
 
 /**
  * Student: List my requests
@@ -134,16 +182,16 @@ exports.listRequests = async (req, res) => {
 
 
     const role = String(req.user?.role || "");
-    const counselorCode = String(req.user?.counselorCode || "");
+    const counselorObjectId = toObjectIdOrEmpty(req.user?._id || req.user?.id);
     const isPrivileged = role === "Admin" || role === "Counselor" || role === "Consultant";
 
     // ✅ Default scoping: Students can ONLY see their own requests (even if mine=false)
     if (!isPrivileged) {
       q.userId = req.user?.id;
-    } else if (role === "Counselor" && counselorCode) {
+    } else if (role === "Counselor" && counselorObjectId) {
       // ✅ Counselors (later dashboard) should only see requests assigned to them by default
       // You can expand this later for admin views.
-      q.counselorId = counselorCode;
+      q.counselorId = counselorObjectId;
     }
 
     if (mine) q.userId = req.user?.id;
@@ -212,6 +260,7 @@ exports.cancelRequest = async (req, res) => {
     }
 
     doc.status = "Cancelled";
+    doc.cancelledAt = new Date();
     await doc.save();
 
     return res.json(formatRequest(doc));
@@ -416,19 +465,15 @@ exports.setAskThreadStatus = async (req, res) => {
  */
 exports.listCounselors = async (req, res) => {
   try {
-    const users = await User.find({
-      role: "Counselor",
-      counselorCode: { $exists: true, $ne: "" },
-    })
-      .select("_id fullName counselorCode specialty role")
-      .sort({ fullName: 1 })
+    const users = await User.find({ role: "Counselor" })
+      .select("_id firstName lastName fullName role")
+      .sort({ fullName: 1, lastName: 1, firstName: 1 })
       .lean();
 
     return res.json({
       items: users.map((u) => ({
-        id: u.counselorCode, // ✅ "C-101"
-        name: u.fullName,
-        specialty: u.specialty || [],
+        id: String(u._id),
+        name: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || "Counselor",
         role: u.role,
       })),
     });
@@ -493,9 +538,14 @@ exports.getAvailability = async (req, res) => {
 
     // ✅ If counselorId is provided, compute for that counselor only (based on bookings)
     if (counselorId) {
+      const counselorObj = toObjectIdOrEmpty(counselorId);
+      if (!counselorObj) {
+        return res.status(400).json({ code: "INVALID_COUNSELOR", message: "Invalid counselorId." });
+      }
+
       const rows = await CounselingRequest.find({
         type: "MEET",
-        counselorId,
+        counselorId: counselorObj,
         date,
         status: { $in: ["Pending", "Approved", "Cancelled"] },
       })
@@ -574,56 +624,40 @@ exports.getAvailability = async (req, res) => {
   }
 };
 
-const THREAD_STATUS_ALLOWED = new Set([
-  "NEW",
-  "UNDER_REVIEW",
-  "APPOINTMENT_REQUIRED",
-  "SCHEDULED",
-  "IN_SESSION",
-  "WAITING_ON_STUDENT",
-  "FOLLOW_UP_REQUIRED",
-  "COMPLETED",
-  "CLOSED",
-  "URGENT",
-  "CRISIS",
-]);
 
-exports.setAskThreadStatus = async (req, res) => {
+
+
+// ---------- shared helpers ----------
+function toObjectIdOrEmpty(value) {
   try {
-    const { id } = req.params; // request id
-    const { status } = req.body || {};
-
-    if (!status || !THREAD_STATUS_ALLOWED.has(String(status))) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
-
-    const doc = await CounselingRequest.findById(id);
-    if (!doc) return res.status(404).json({ message: "Request not found" });
-
-    // Only ASK requests have threadStatus
-    if (doc.type !== "ASK") {
-      return res.status(400).json({ message: "threadStatus can only be set for ASK requests" });
-    }
-
-    doc.threadStatus = String(status);
-    doc.threadStatusUpdatedAt = new Date();
-    doc.threadStatusUpdatedBy = req.user?.id;
-
-    await doc.save();
-
-    return res.json({
-      ok: true,
-      id: doc._id,
-      threadStatus: doc.threadStatus,
-      threadStatusUpdatedAt: doc.threadStatusUpdatedAt,
-      threadStatusUpdatedBy: doc.threadStatusUpdatedBy,
-    });
-  } catch (err) {
-    console.error("setAskThreadStatus error:", err);
-    return res.status(500).json({ message: "Server error." });
+    if (!value) return null;
+    const s = String(value).trim();
+    if (!s) return null;
+    return new mongoose.Types.ObjectId(s);
+  } catch {
+    return null;
   }
-};
+}
 
+// Calendar-week range (Mon–Sun) in Asia/Manila, using the SESSION date (YYYY-MM-DD)
+function getPHWeekRange(yyyyMmDd) {
+  // Build a date pinned to Asia/Manila midnight (+08:00)
+  const d = new Date(`${yyyyMmDd}T00:00:00+08:00`);
+  if (Number.isNaN(d.getTime())) return { weekStart: yyyyMmDd, weekEnd: yyyyMmDd };
+
+  // In JS: Sunday=0 ... Saturday=6
+  const dow = d.getUTCDay(); // because we pinned the offset above, UTC day equals PH day
+  const diffToMon = (dow + 6) % 7; // 0 if Mon, 6 if Sun
+
+  const monday = new Date(d);
+  monday.setUTCDate(monday.getUTCDate() - diffToMon);
+
+  const sunday = new Date(monday);
+  sunday.setUTCDate(sunday.getUTCDate() + 6);
+
+  const toPH = (dt) => dt.toLocaleDateString("en-CA", { timeZone: "Asia/Manila" }); // YYYY-MM-DD
+  return { weekStart: toPH(monday), weekEnd: toPH(sunday) };
+}
 
 // ---------- local helpers for availability ----------
 function toMinutes(hhmm) {
