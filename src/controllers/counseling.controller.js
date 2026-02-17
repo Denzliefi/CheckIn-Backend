@@ -46,6 +46,11 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: "MISSING_FIELDS", message: "Please fill in all required fields." });
     }
 
+    const allowedSessionTypes = new Set(["Online", "In-person"]);
+    if (!allowedSessionTypes.has(String(sessionType))) {
+      return res.status(400).json({ code: "INVALID_SESSION_TYPE", message: "Please select a valid session type." });
+    }
+
     const rule = validateMeetRules({ date, time });
     if (!rule.ok) {
       return res.status(400).json({ code: rule.code, message: rule.message });
@@ -177,6 +182,7 @@ exports.listRequests = async (req, res) => {
     const mine = String(req.query.mine || "") === "true";
     const status = req.query.status;
     const type = req.query.type;
+    const sessionType = req.query.sessionType;
     const past = String(req.query.past || "") === "true";
 
     const q = {};
@@ -198,6 +204,7 @@ exports.listRequests = async (req, res) => {
     if (mine) q.userId = req.user?.id;
     if (status) q.status = status;
     if (type) q.type = type;
+    if (sessionType) q.sessionType = sessionType;
 
     // Past Meetings filter: MEET where Completed OR date/time already passed
     // Minimal version: just Completed; you can enhance later.
@@ -749,3 +756,4 @@ function formatRequestLean(o) {
   };
 }
 
+// ----
