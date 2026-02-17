@@ -1,5 +1,6 @@
 const CounselingRequest = require("../models/CounselingRequest");
-const { validateMeetRules } = require("../utils/counselingValidation");
+const { DateTime } = require("luxon");
+const { validateMeetRules, phNow, PH_TZ, getMinLeadMinutes, ceilToNextHour, isWeekend, isHoliday } = require("../utils/counselingValidation");
 const { generateTimeSlots } = require("../utils/availability");
 const User = require("../models/User.model");
 const mongoose = require("mongoose");
@@ -48,16 +49,6 @@ exports.createMeet = async (req, res) => {
     const rule = validateMeetRules({ date, time });
     if (!rule.ok) {
       return res.status(400).json({ code: rule.code, message: rule.message });
-    }
-
-    // Enforce the same 1-hour slot rules as the UI (backend source of truth)
-    const time24 = String(time || "").trim();
-    const validSlots = new Set(generateSlots("08:00", "17:00", 60));
-    if (!validSlots.has(time24)) {
-      return res.status(400).json({ code: "INVALID_TIME", message: "Invalid time slot." });
-    }
-    if (time24 === "12:00") {
-      return res.status(400).json({ code: "LUNCH_BREAK", message: "Lunch break (12:00 PM) is not available." });
     }
 
     // =========================
@@ -510,18 +501,41 @@ exports.getAvailability = async (req, res) => {
       return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date format. Use YYYY-MM-DD." });
     }
 
-    // Weekend check (stable for YYYY-MM-DD)
-    const d = new Date(date + "T00:00:00.000Z");
-    if (Number.isNaN(d.getTime())) {
+    // Validate date value + block weekends/holidays (PH calendar)
+    const test = DateTime.fromISO(date, { zone: PH_TZ });
+    if (!test.isValid) {
       return res.status(400).json({ code: "INVALID_DATE", message: "Invalid date." });
     }
-    const day = d.getUTCDay(); // 0 Sun ... 6 Sat
-    if (day === 0 || day === 6) {
+    if (isWeekend(date)) {
       return res.status(400).json({ code: "INVALID_DATE", message: "Weekends are not allowed." });
     }
+    if (isHoliday(date)) {
+      return res.status(400).json({ code: "INVALID_DATE", message: "Holiday is not allowed." });
+    }
 
-    const workHours = { start: "08:00", end: "17:00", stepMin: 60 };
+    // Work hours (backend source of truth)
+    const workHours = { start: "08:00", end: "17:00", stepMin: 60 }; // ✅ 60-minute slots
     const allSlots = generateSlots(workHours.start, workHours.end, workHours.stepMin);
+
+    // Professional scheduling rule:
+    // - Past times are not bookable
+    // - Minimum lead time is enforced (rounded to next hour boundary)
+    const now = phNow();
+    const leadMin = getMinLeadMinutes();
+    const earliestAllowed = leadMin > 0 ? ceilToNextHour(now.plus({ minutes: leadMin })) : now;
+
+    const gateReason = (t) => {
+      // Lunch rule
+      if (t === "12:00") return "Lunch break";
+
+      const slotDt = DateTime.fromISO(`${date}T${t}`, { zone: PH_TZ });
+      if (!slotDt.isValid) return "Invalid time";
+
+      if (slotDt < now) return "Time passed";
+      if (leadMin > 0 && slotDt < earliestAllowed) return `Too soon (earliest ${earliestAllowed.toFormat("MMM d, h:mm a")})`;
+
+      return "";
+    };
 
     // Same-day cancellation rule:
     // - Pending/Approved always block
@@ -565,8 +579,11 @@ exports.getAvailability = async (req, res) => {
         date,
         counselorId,
         workHours,
+        leadMinutes: leadMin,
+        earliestAllowed: earliestAllowed.toISO(),
         slots: allSlots.map((t) => {
-          if (t === "12:00") return { time: t, enabled: false, reason: "Lunch break" };
+          const gated = gateReason(t);
+          if (gated) return { time: t, enabled: false, reason: gated };
           if (bookedTimes.has(t)) return { time: t, enabled: false, reason: "Booked" };
           return { time: t, enabled: true };
         }),
@@ -584,7 +601,13 @@ exports.getAvailability = async (req, res) => {
         date,
         counselorId: null,
         workHours,
-        slots: allSlots.map((t) => (t === "12:00" ? { time: t, enabled: false, reason: "Lunch break" } : { time: t, enabled: false, reason: "No counselors available" })),
+        leadMinutes: leadMin,
+        earliestAllowed: earliestAllowed.toISO(),
+        slots: allSlots.map((t) => {
+          const gated = gateReason(t);
+          if (gated) return { time: t, enabled: false, reason: gated };
+          return { time: t, enabled: false, reason: "No counselors available" };
+        }),
       });
     }
 
@@ -613,7 +636,9 @@ exports.getAvailability = async (req, res) => {
     }));
 
     const slots = allSlots.map((t) => {
-      if (t === "12:00") return { time: t, enabled: false, reason: "Lunch break" };
+      const gated = gateReason(t);
+      if (gated) return { time: t, enabled: false, reason: gated };
+
       const bookedSet = bookedMap.get(t) || new Set();
       const available = roster.filter((c) => !bookedSet.has(c.id));
 
@@ -626,15 +651,12 @@ exports.getAvailability = async (req, res) => {
       };
     });
 
-    return res.json({ date, counselorId: null, workHours, slots });
+    return res.json({ date, counselorId: null, workHours, leadMinutes: leadMin, earliestAllowed: earliestAllowed.toISO(), slots });
   } catch (err) {
     console.error("getAvailability error:", err);
     return res.status(500).json({ message: "Server error." });
   }
 };
-
-
-
 
 // ---------- shared helpers ----------
 function toObjectIdOrEmpty(value) {
