@@ -1,18 +1,21 @@
 console.log("SERVER FILE:", __filename);
 console.log("CWD:", process.cwd());
 
+const http = require("http");
 const express = require("express");
 const dotenv = require("dotenv");
 const cors = require("cors");
 const morgan = require("morgan");
 
 const connectDB = require("./src/config/db");
+const { initSocket, getAllowedOrigins } = require("./src/config/socket");
 
 const authRoutes = require("./src/routes/auth.routes");
 const counselingRoutes = require("./src/routes/counseling.routes");
 const userRoutes = require("./src/routes/user.routes");
 const journalRoutes = require("./src/routes/journal.routes");
 const assessmentRoutes = require("./src/routes/assessment.routes");
+const messagesRoutes = require("./src/routes/messages.routes");
 
 const { notFound, errorHandler } = require("./src/middleware/errormiddleware");
 
@@ -23,14 +26,17 @@ const app = express();
 /* ======================
    MIDDLEWARE
 ====================== */
+const allowedOrigins = getAllowedOrigins();
+
 app.use(
   cors({
-    origin: ["https://checkinauabc.vercel.app", "http://localhost:3000"],
+    origin: allowedOrigins,
     credentials: false, // Bearer token auth (no cookies)
     allowedHeaders: ["Content-Type", "Authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
 );
+
 app.use(express.json());
 app.use(morgan("dev"));
 
@@ -49,7 +55,7 @@ app.use("/api/counseling", counselingRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/journal", journalRoutes);
 app.use("/api/assessments", assessmentRoutes);
- // ✅ journal MUST be mounted before notFound
+app.use("/api/messages", messagesRoutes);
 
 /* ======================
    ERROR MIDDLEWARE (LAST)
@@ -61,7 +67,13 @@ const PORT = process.env.PORT || 5000;
 
 console.log("ABOUT TO LISTEN ON PORT:", PORT);
 
-const server = app.listen(PORT, () => {
+// ✅ Create HTTP server for Socket.IO
+const httpServer = http.createServer(app);
+
+// ✅ Initialize Socket.IO
+initSocket(httpServer);
+
+const server = httpServer.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
 

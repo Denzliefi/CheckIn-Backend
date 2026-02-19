@@ -26,14 +26,14 @@ exports.protect = async (req, res, next) => {
 
     const decoded = jwt.verify(token, secret);
 
-    // Your payload is { id, role }
+    // Your payload is { id }
     if (!decoded?.id) {
       res.status(401);
       throw new Error("Not authorized, invalid token payload");
     }
 
-    // Load fresh user from DB (so req.user is a real user doc)
-    const user = await User.findById(decoded.id).select("-passwordHash");
+    // Load fresh user from DB
+    const user = await User.findById(decoded.id).select("-password");
     if (!user) {
       res.status(401);
       throw new Error("Not authorized, user not found");
