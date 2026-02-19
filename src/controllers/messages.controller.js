@@ -1,412 +1,398 @@
 // backend/src/controllers/messages.controller.js
 const mongoose = require("mongoose");
-
 const User = require("../models/User.model");
 const MessageThread = require("../models/MessageThread.model");
 const Message = require("../models/Message.model");
-
 const { getIO } = require("../config/socket");
 
 /* -----------------------------
    Helpers
 ----------------------------- */
-function cleanText(v) {
-  return String(v ?? "")
-    .replace(/[\u0000-\u001F\u007F]/g, "")
-    .trim()
-    .slice(0, 2000);
-}
-
-function mapToObject(maybeMap) {
-  if (!maybeMap) return {};
-  // if it's already a plain object
-  if (typeof maybeMap === "object" && !("get" in maybeMap)) return maybeMap;
-
-  const out = {};
-  for (const [k, v] of maybeMap.entries()) out[String(k)] = Number(v) || 0;
-  return out;
-}
-
 function asId(v) {
   try {
+    if (!v) return null;
     return new mongoose.Types.ObjectId(String(v));
   } catch {
     return null;
   }
 }
 
-function isParticipant(thread, userId) {
-  const uid = String(userId);
-  return (
-    String(thread?.studentId?._id || thread?.studentId) === uid ||
-    String(thread?.counselorId?._id || thread?.counselorId) === uid ||
-    (thread?.participants || []).some((p) => String(p) === uid)
-  );
+function roleLower(user) {
+  return String(user?.role || "").toLowerCase();
 }
 
-function otherParticipantId(thread, userId) {
-  const uid = String(userId);
-  const s = String(thread.studentId?._id || thread.studentId);
-  const c = String(thread.counselorId?._id || thread.counselorId);
-  return uid === s ? c : s;
+function isCounselor(user) {
+  return roleLower(user) === "counselor";
 }
 
-function messageDto(m) {
-  return {
-    _id: String(m._id),
-    threadId: String(m.threadId),
-    senderId: String(m.senderId),
-    text: m.text,
-    createdAt: m.createdAt,
-  };
+function cleanText(v) {
+  return String(v ?? "").trim();
 }
 
 async function getMessagesForThread(threadId, limit = 40) {
-  const lim = Math.min(Math.max(Number(limit) || 40, 1), 200);
-  const latest = await Message.find({ threadId })
+  const items = await Message.find({ threadId })
     .sort({ createdAt: -1 })
-    .limit(lim)
+    .limit(Math.max(1, Math.min(200, Number(limit) || 40)))
     .lean();
-
-  // return ascending for UI rendering
-  return latest.reverse().map(messageDto);
+  return items.reverse();
 }
 
-function threadDto(t, { includeMessages = true, messages = [] } = {}) {
+// Mask student identity for counselors until claimed by them (or anonymous)
+function maskThreadForViewer(thread, viewer) {
+  const vId = String(viewer?._id || "");
+  const vIsCounselor = isCounselor(viewer);
+
+  const t = { ...thread };
+
+  // If counselor and NOT the assigned counselor -> hide student identity
+  const assignedId = t.counselorId ? String(t.counselorId?._id || t.counselorId) : "";
+  const isAssignedToMe = assignedId && assignedId === vId;
+
+  if (vIsCounselor && !isAssignedToMe) {
+    t.studentId = null;
+  }
+
+  // If thread is anonymous, hide identity for everyone except student (student still sees themselves by token)
+  if (t.anonymous && vIsCounselor) {
+    t.studentId = null;
+  }
+
+  return t;
+}
+
+function threadDto(thread, { viewer, includeMessages = false, messages = [] } = {}) {
+  const t = maskThreadForViewer(thread, viewer);
+
+  const myId = String(viewer?._id || "");
+
+  const unreadCounts = t.unreadCounts || {};
+  const unread =
+    typeof unreadCounts.get === "function"
+      ? unreadCounts.get(myId) || 0
+      : unreadCounts?.[myId] || 0;
+
   return {
-    _id: String(t._id),
+    _id: t._id,
     studentId: t.studentId,
     counselorId: t.counselorId,
-    participants: (t.participants || []).map(String),
+    claimedAt: t.claimedAt || null,
+    participants: t.participants || [],
     anonymous: !!t.anonymous,
     status: t.status,
     lastMessage: t.lastMessage || "",
-    lastMessageAt: t.lastMessageAt || t.updatedAt,
-    unreadCounts: mapToObject(t.unreadCounts),
+    lastMessageAt: t.lastMessageAt || null,
+    unreadCounts: t.unreadCounts || {},
+    unreadForMe: unread,
     messages: includeMessages ? messages : undefined,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
   };
 }
 
+function canAccessThread(thread, viewer) {
+  const vId = String(viewer?._id || "");
+  if (!vId) return false;
+
+  if (isCounselor(viewer)) {
+    // system-wide read access for counselors
+    return true;
+  }
+
+  // students can only see their own
+  return String(thread.studentId?._id || thread.studentId) === vId;
+}
+
 /* -----------------------------
-   Controllers
+   Handlers
 ----------------------------- */
 
 // GET /api/messages/threads?includeMessages=1&limit=40
 exports.listThreads = async (req, res, next) => {
   try {
-    const includeMessages = String(req.query.includeMessages ?? "1") !== "0";
-    const limit = Number(req.query.limit || 40);
+    const viewer = req.user;
+    const includeMessages = String(req.query?.includeMessages || "1") === "1";
+    const limit = Number(req.query?.limit || 40);
 
-    const userId = req.user._id;
+    const q = isCounselor(viewer)
+      ? { status: "open" } // system-wide inbox: show all open threads
+      : { studentId: viewer._id, status: "open" };
 
-    const threads = await MessageThread.find({ participants: userId })
+    const threads = await MessageThread.find(q)
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .populate("studentId", "fullName email studentNumber role campus")
       .populate("counselorId", "fullName email counselorCode role campus")
       .lean();
 
-    const out = [];
+    const items = [];
     for (const t of threads) {
-      const messages = includeMessages ? await getMessagesForThread(t._id, limit) : [];
-      out.push(threadDto(t, { includeMessages, messages }));
+      let messages = [];
+      if (includeMessages) messages = await getMessagesForThread(t._id, limit);
+      items.push(threadDto(t, { viewer, includeMessages, messages }));
     }
 
-    res.json({ items: out });
-  } catch (err) {
-    next(err);
+    return res.json({ items });
+  } catch (e) {
+    next(e);
   }
 };
 
-// POST /api/messages/threads/ensure  { anonymous?: boolean, counselorId?: string, studentId?: string }
-// - Student: ensures they have an open thread; auto-assign counselor if not provided.
-// - Counselor: requires studentId to ensure (used rarely)
+// POST /api/messages/threads/ensure  (student creates 1 open thread)
 exports.ensureThread = async (req, res, next) => {
   try {
-    const meId = req.user._id;
-    const role = String(req.user.role || "");
+    const viewer = req.user;
+
+    if (isCounselor(viewer)) {
+      res.status(403);
+      throw new Error("Counselors cannot create threads.");
+    }
 
     const anonymous = !!req.body?.anonymous;
 
-    // Student flow
-    if (role.toLowerCase() === "student") {
-      // keep it simple: 1 open thread per student
-      const existing = await MessageThread.findOne({ studentId: meId, status: "open" })
-        .populate("studentId", "fullName email studentNumber role campus")
-        .populate("counselorId", "fullName email counselorCode role campus")
-        .lean();
-
-      if (existing) {
-        const messages = await getMessagesForThread(existing._id, 40);
-        return res.json({ item: threadDto(existing, { includeMessages: true, messages }) });
-      }
-
-      // Choose counselor
-      const requestedCounselorId = asId(req.body?.counselorId);
-      let counselorId = requestedCounselorId;
-
-      if (counselorId) {
-        const c = await User.findById(counselorId).select("_id role").lean();
-        if (!c || String(c.role || "").toLowerCase() !== "counselor") counselorId = null;
-      }
-
-      if (!counselorId) {
-        const counselors = await User.find({ role: "Counselor" }).select("_id").lean();
-        if (!counselors.length) {
-          res.status(404);
-          throw new Error("No counselor accounts found.");
-        }
-
-        const counselorIds = counselors.map((c) => c._id);
-
-        // Pick least-loaded counselor (open threads)
-        const loads = await MessageThread.aggregate([
-          { $match: { status: "open", counselorId: { $in: counselorIds } } },
-          { $group: { _id: "$counselorId", c: { $sum: 1 } } },
-        ]);
-
-        const loadMap = new Map(loads.map((x) => [String(x._id), x.c]));
-        let best = counselorIds[0];
-        let bestCount = loadMap.get(String(best)) ?? 0;
-
-        for (const cid of counselorIds) {
-          const cnt = loadMap.get(String(cid)) ?? 0;
-          if (cnt < bestCount) {
-            best = cid;
-            bestCount = cnt;
-          }
-        }
-        counselorId = best;
-      }
-
-      const thread = await MessageThread.create({
-        studentId: meId,
-        counselorId,
-        participants: [meId, counselorId],
-        anonymous,
-        status: "open",
-        lastMessage: "",
-        lastMessageAt: null,
-        unreadCounts: { [String(meId)]: 0, [String(counselorId)]: 0 },
-      });
-
-      const populated = await MessageThread.findById(thread._id)
-        .populate("studentId", "fullName email studentNumber role campus")
-        .populate("counselorId", "fullName email counselorCode role campus")
-        .lean();
-
-      const messages = await getMessagesForThread(populated._id, 40);
-
-      // Join rooms for currently connected sockets (optional convenience)
-      try {
-        const io = getIO();
-        io.to(`user:${String(meId)}`).emit("thread:created", { item: threadDto(populated, { includeMessages: true, messages }) });
-        io.to(`user:${String(counselorId)}`).emit("thread:created", { item: threadDto(populated, { includeMessages: true, messages }) });
-      } catch {}
-
-      return res.status(201).json({ item: threadDto(populated, { includeMessages: true, messages }) });
-    }
-
-    // Counselor flow: ensure thread with a given student
-    if (role.toLowerCase() === "counselor") {
-      const studentId = asId(req.body?.studentId);
-      if (!studentId) {
-        res.status(400);
-        throw new Error("studentId is required for counselors.");
-      }
-
-      const existing = await MessageThread.findOne({
-        studentId,
-        counselorId: meId,
-        status: "open",
-      })
-        .populate("studentId", "fullName email studentNumber role campus")
-        .populate("counselorId", "fullName email counselorCode role campus")
-        .lean();
-
-      if (existing) {
-        const messages = await getMessagesForThread(existing._id, 40);
-        return res.json({ item: threadDto(existing, { includeMessages: true, messages }) });
-      }
-
-      const thread = await MessageThread.create({
-        studentId,
-        counselorId: meId,
-        participants: [studentId, meId],
-        anonymous,
-        status: "open",
-        unreadCounts: { [String(studentId)]: 0, [String(meId)]: 0 },
-      });
-
-      const populated = await MessageThread.findById(thread._id)
-        .populate("studentId", "fullName email studentNumber role campus")
-        .populate("counselorId", "fullName email counselorCode role campus")
-        .lean();
-
-      const messages = await getMessagesForThread(populated._id, 40);
-      return res.status(201).json({ item: threadDto(populated, { includeMessages: true, messages }) });
-    }
-
-    res.status(403);
-    throw new Error("Only Students and Counselors can use messaging.");
-  } catch (err) {
-    next(err);
-  }
-};
-
-// GET /api/messages/threads/:threadId
-exports.getThread = async (req, res, next) => {
-  try {
-    const threadId = asId(req.params.threadId);
-    if (!threadId) {
-      res.status(400);
-      throw new Error("Invalid thread id");
-    }
-
-    const thread = await MessageThread.findById(threadId)
+    // keep it simple: 1 open thread per student
+    const existing = await MessageThread.findOne({ studentId: viewer._id, status: "open" })
       .populate("studentId", "fullName email studentNumber role campus")
       .populate("counselorId", "fullName email counselorCode role campus")
       .lean();
 
-    if (!thread) {
-      res.status(404);
-      throw new Error("Thread not found");
+    if (existing) {
+      const messages = await getMessagesForThread(existing._id, 40);
+      return res.json({ item: threadDto(existing, { viewer, includeMessages: true, messages }) });
     }
 
-    if (!isParticipant(thread, req.user._id)) {
-      res.status(403);
-      throw new Error("Forbidden");
-    }
+    // Create unclaimed thread (counselorId = null)
+    const thread = await MessageThread.create({
+      studentId: viewer._id,
+      counselorId: null,
+      claimedAt: null,
+      participants: [viewer._id],
+      anonymous,
+      status: "open",
+      lastMessage: "",
+      lastMessageAt: null,
+      unreadCounts: { [String(viewer._id)]: 0 },
+    });
 
-    const messages = await getMessagesForThread(threadId, Number(req.query.limit || 60));
+    const populated = await MessageThread.findById(thread._id)
+      .populate("studentId", "fullName email studentNumber role campus")
+      .populate("counselorId", "fullName email counselorCode role campus")
+      .lean();
 
-    res.json({ item: threadDto(thread, { includeMessages: true, messages }) });
-  } catch (err) {
-    next(err);
+    // Notify counselors that a new thread exists (system-wide inbox)
+    try {
+      getIO().emit("thread:created", { threadId: String(thread._id) });
+      getIO().emit("thread:update", { threadId: String(thread._id) });
+    } catch {}
+
+    return res.status(201).json({ item: threadDto(populated, { viewer, includeMessages: true, messages: [] }) });
+  } catch (e) {
+    next(e);
   }
 };
 
-// POST /api/messages/threads/:threadId/messages  { text }
-exports.sendMessage = async (req, res, next) => {
+// GET /api/messages/threads/:threadId?limit=60
+exports.getThread = async (req, res, next) => {
   try {
+    const viewer = req.user;
     const threadId = asId(req.params.threadId);
     if (!threadId) {
       res.status(400);
-      throw new Error("Invalid thread id");
+      throw new Error("Invalid thread id.");
     }
 
-    const text = cleanText(req.body?.text);
-    if (!text) {
-      res.status(400);
-      throw new Error("Message text is required.");
-    }
+    const limit = Number(req.query?.limit || 60);
 
     const thread = await MessageThread.findById(threadId)
-      .select("studentId counselorId participants status")
+      .populate("studentId", "fullName email studentNumber role campus")
+      .populate("counselorId", "fullName email counselorCode role campus")
       .lean();
 
     if (!thread) {
       res.status(404);
       throw new Error("Thread not found.");
     }
-    if (String(thread.status) === "closed") {
-      res.status(400);
-      throw new Error("This conversation is closed.");
-    }
-    if (!isParticipant(thread, req.user._id)) {
+
+    if (!canAccessThread(thread, viewer)) {
       res.status(403);
-      throw new Error("Forbidden");
+      throw new Error("Forbidden.");
     }
 
-    const senderId = req.user._id;
-    const receiverId = otherParticipantId(thread, senderId);
+    const messages = await getMessagesForThread(thread._id, limit);
+    return res.json({ item: threadDto(thread, { viewer, includeMessages: true, messages }) });
+  } catch (e) {
+    next(e);
+  }
+};
 
-    const msg = await Message.create({ threadId, senderId, text });
+// POST /api/messages/threads/:threadId/messages
+exports.sendMessage = async (req, res, next) => {
+  try {
+    const viewer = req.user;
+    const threadId = asId(req.params.threadId);
+    if (!threadId) {
+      res.status(400);
+      throw new Error("Invalid thread id.");
+    }
 
-    // update thread summary + unread counts
-    const now = new Date();
-    const incKey = `unreadCounts.${receiverId}`;
-    const setKey = `unreadCounts.${String(senderId)}`;
+    const text = cleanText(req.body?.text);
+    if (!text) {
+      res.status(400);
+      throw new Error("Message is required.");
+    }
+    if (text.length > 2000) {
+      res.status(400);
+      throw new Error("Message too long.");
+    }
 
-    await MessageThread.findByIdAndUpdate(
-      threadId,
-      {
-        $set: {
-          lastMessage: text,
-          lastMessageAt: now,
-          [setKey]: 0,
-        },
-        $inc: { [incKey]: 1 },
-      },
-      { new: false }
-    );
+    // Load thread
+    const thread = await MessageThread.findById(threadId);
+    if (!thread) {
+      res.status(404);
+      throw new Error("Thread not found.");
+    }
 
-    // Refetch updated thread for clients (keeps UI consistent)
-    const updated = await MessageThread.findById(threadId)
-      .populate("studentId", "fullName email studentNumber role campus")
-      .populate("counselorId", "fullName email counselorCode role campus")
-      .lean();
+    // Access rules
+    if (!isCounselor(viewer) && String(thread.studentId) !== String(viewer._id)) {
+      res.status(403);
+      throw new Error("Forbidden.");
+    }
 
-    const payloadThread = threadDto(updated, { includeMessages: false });
+    // Claim-on-reply for counselors (atomic)
+    if (isCounselor(viewer)) {
+      if (thread.counselorId && String(thread.counselorId) !== String(viewer._id)) {
+        res.status(403);
+        throw new Error("This chat is already claimed by another counselor.");
+      }
 
-    // broadcast to both sides (personal rooms)
+      if (!thread.counselorId) {
+        const claimed = await MessageThread.findOneAndUpdate(
+          { _id: threadId, counselorId: null },
+          {
+            $set: { counselorId: viewer._id, claimedAt: new Date() },
+            $addToSet: { participants: viewer._id },
+            $setOnInsert: {},
+          },
+          { new: true }
+        );
+
+        if (!claimed) {
+          res.status(409);
+          throw new Error("Another counselor already claimed this chat.");
+        }
+
+        thread.counselorId = claimed.counselorId;
+        thread.claimedAt = claimed.claimedAt;
+
+        // Broadcast claim event
+        try {
+          getIO().emit("thread:claimed", { threadId: String(threadId), counselorId: String(viewer._id) });
+          getIO().emit("thread:update", { threadId: String(threadId) });
+        } catch {}
+      }
+    } else {
+      // student sending: update unread for counselors (system-wide) and assigned counselor (if any)
+      // no extra checks
+    }
+
+    // Save message (with optional clientId if provided)
+    const clientId = req.body?.clientId ? String(req.body.clientId) : null;
+
+    let msg;
     try {
-      const io = getIO();
-      io.to(`user:${String(senderId)}`).emit("message:new", {
-        threadId: String(threadId),
-        message: messageDto(msg),
-        thread: payloadThread,
+      msg = await Message.create({
+        threadId,
+        senderId: viewer._id,
+        clientId,
+        text,
       });
-      io.to(`user:${String(receiverId)}`).emit("message:new", {
-        threadId: String(threadId),
-        message: messageDto(msg),
-        thread: payloadThread,
-      });
-      // also thread room
-      io.to(`thread:${String(threadId)}`).emit("thread:update", payloadThread);
     } catch (e) {
-      // sockets not required for REST success
+      // If clientId caused duplicate insert, fetch existing and return it (idempotent)
+      if (clientId && String(e?.code) === "11000") {
+        msg = await Message.findOne({ threadId, senderId: viewer._id, clientId }).lean();
+      } else {
+        throw e;
+      }
     }
 
-    res.status(201).json({ item: messageDto(msg), thread: payloadThread });
-  } catch (err) {
-    next(err);
+    // Update thread summary + unread counts
+    thread.lastMessage = text;
+    thread.lastMessageAt = msg.createdAt;
+
+    const unread = thread.unreadCounts || new Map();
+
+    // helper to get/set map-like
+    const getCnt = (id) => {
+      const k = String(id);
+      if (typeof unread.get === "function") return Number(unread.get(k) || 0);
+      return Number(unread[k] || 0);
+    };
+    const setCnt = (id, v) => {
+      const k = String(id);
+      if (typeof unread.set === "function") unread.set(k, v);
+      else unread[k] = v;
+    };
+
+    if (isCounselor(viewer)) {
+      // counselor -> student unread increments
+      setCnt(thread.studentId, getCnt(thread.studentId) + 1);
+      setCnt(viewer._id, 0);
+    } else {
+      // student -> counselor unread increments for assigned counselor only (but counselors can still see thread list)
+      if (thread.counselorId) {
+        setCnt(thread.counselorId, getCnt(thread.counselorId) + 1);
+      }
+      setCnt(viewer._id, 0);
+    }
+
+    thread.unreadCounts = unread;
+    await thread.save();
+
+    // Emit realtime: message:new and thread:update
+    try {
+      getIO().emit("message:new", { threadId: String(threadId), message: msg, thread: { _id: thread._id, counselorId: thread.counselorId, unreadCounts: thread.unreadCounts } });
+      getIO().emit("thread:update", { threadId: String(threadId) });
+    } catch {}
+
+    return res.status(201).json({ item: msg });
+  } catch (e) {
+    next(e);
   }
 };
 
 // POST /api/messages/threads/:threadId/read
 exports.markRead = async (req, res, next) => {
   try {
+    const viewer = req.user;
     const threadId = asId(req.params.threadId);
     if (!threadId) {
       res.status(400);
-      throw new Error("Invalid thread id");
+      throw new Error("Invalid thread id.");
     }
 
-    const thread = await MessageThread.findById(threadId).select("participants").lean();
+    const thread = await MessageThread.findById(threadId);
     if (!thread) {
       res.status(404);
       throw new Error("Thread not found.");
     }
-    if (!isParticipant(thread, req.user._id)) {
+
+    if (!isCounselor(viewer) && String(thread.studentId) !== String(viewer._id)) {
       res.status(403);
-      throw new Error("Forbidden");
+      throw new Error("Forbidden.");
     }
 
-    const userId = String(req.user._id);
-    const setKey = `unreadCounts.${userId}`;
+    const unread = thread.unreadCounts || new Map();
+    const key = String(viewer._id);
+    if (typeof unread.set === "function") unread.set(key, 0);
+    else unread[key] = 0;
 
-    await MessageThread.findByIdAndUpdate(threadId, { $set: { [setKey]: 0 } }, { new: false });
+    thread.unreadCounts = unread;
+    await thread.save();
 
     try {
-      const io = getIO();
-      io.to(`user:${userId}`).emit("thread:read", { threadId: String(threadId) });
-      io.to(`thread:${String(threadId)}`).emit("thread:read", { threadId: String(threadId), userId });
+      getIO().emit("thread:update", { threadId: String(threadId) });
     } catch {}
 
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
+    return res.json({ ok: true });
+  } catch (e) {
+    next(e);
   }
 };
