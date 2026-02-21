@@ -16,6 +16,11 @@ const MessageThreadSchema = new mongoose.Schema(
     // If true: counselor should not see the student's identity in the UI (even when claimed)
     anonymous: { type: Boolean, default: false },
 
+    // ✅ Thread-level identity mode + lock (prevents switching mid-conversation)
+    identityMode: { type: String, enum: ["student", "anonymous"], default: "student" },
+    identityLocked: { type: Boolean, default: false },
+    identityLockedAt: { type: Date, default: null },
+
     status: { type: String, enum: ["open", "closed"], default: "open", index: true },
 
     lastMessage: { type: String, default: "" },

@@ -120,6 +120,9 @@ function threadDto(thread, { viewer, includeMessages = false, messages = [] } = 
     claimedAt: t.claimedAt || null,
     participants: (t.participants || []).map(String),
     anonymous: !!t.anonymous,
+    identityMode: String(t.identityMode || (t.anonymous ? "anonymous" : "student")),
+    identityLocked: !!t.identityLocked,
+    identityLockedAt: t.identityLockedAt || null,
     status: t.status,
     lastMessage: t.lastMessage || "",
     lastMessageAt: t.lastMessageAt || t.updatedAt,
@@ -183,9 +186,26 @@ exports.ensureThread = async (req, res, next) => {
       .lean();
 
     if (existing) {
-      const msgs = await getMessagesForThread(existing._id, 60);
-      return res.json({ item: threadDto(existing, { viewer, includeMessages: true, messages: msgs }) });
-    }
+  const msgs = await getMessagesForThread(existing._id, 60);
+
+  // ✅ Allow changing identity mode ONLY before it is locked (before first sent message)
+  if (!existing.identityLocked && typeof req.body?.anonymous === "boolean" && existing.anonymous !== anonymous) {
+    await MessageThread.findByIdAndUpdate(
+      existing._id,
+      { $set: { anonymous, identityMode: anonymous ? "anonymous" : "student" } },
+      { new: false }
+    );
+
+    const refreshed = await MessageThread.findById(existing._id)
+      .populate("studentId", "fullName email studentNumber role campus")
+      .populate("counselorId", "fullName email counselorCode role campus")
+      .lean();
+
+    return res.json({ item: threadDto(refreshed, { viewer, includeMessages: true, messages: msgs }) });
+  }
+
+  return res.json({ item: threadDto(existing, { viewer, includeMessages: true, messages: msgs }) });
+}
 
     const created = await MessageThread.create({
       studentId: viewer._id,
@@ -193,6 +213,7 @@ exports.ensureThread = async (req, res, next) => {
       claimedAt: null,
       participants: [viewer._id],
       anonymous,
+      identityMode: anonymous ? "anonymous" : "student",
       status: "open",
       lastMessage: "",
       lastMessageAt: null,
@@ -288,6 +309,32 @@ exports.sendMessage = async (req, res, next) => {
         throw new Error("Forbidden");
       }
     }
+
+
+/* -----------------------------
+   Identity lock (student only)
+   - Student chooses identity (student/anonymous) BEFORE sending first message
+   - On first student message, identity is LOCKED and cannot change later
+----------------------------- */
+if (!isCounselor(viewer)) {
+  const requestedMode = String(req.body?.senderMode || "").toLowerCase();
+  const wantsAnonymous = requestedMode === "anonymous";
+
+  if (thread.identityLocked) {
+    const currentAnon = !!thread.anonymous;
+    if (requestedMode && currentAnon !== wantsAnonymous) {
+      res.status(409);
+      throw new Error("Identity is locked for this conversation. You can’t switch identity after sending a message.");
+    }
+  } else {
+    // Lock on first student message
+    thread.anonymous = wantsAnonymous ? true : false;
+    thread.identityMode = wantsAnonymous ? "anonymous" : "student";
+    thread.identityLocked = true;
+    thread.identityLockedAt = new Date();
+    await thread.save();
+  }
+}
 
     // Claim-on-reply for counselors (atomic)
     let claimedNow = false;
