@@ -3,28 +3,18 @@ const mongoose = require("mongoose");
 
 const MessageThreadSchema = new mongoose.Schema(
   {
-    studentId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
-    },
-    counselorId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
-    },
+    studentId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
-    // fast "is participant" queries
+    // ✅ NULL until a counselor claims the thread (claim-on-reply)
+    counselorId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
+
+    claimedAt: { type: Date, default: null },
+
+    // fast "is participant" queries + socket auto-join
     participants: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
 
-    // If true: counselor should not see the student's identity in the UI
+    // If true: counselor should not see the student's identity in the UI (even when claimed)
     anonymous: { type: Boolean, default: false },
-
-    // ✅ Once the student sends their FIRST message, identity becomes locked and cannot be changed
-    identityLocked: { type: Boolean, default: false },
-    identityLockedAt: { type: Date, default: null },
 
     status: { type: String, enum: ["open", "closed"], default: "open", index: true },
 
@@ -33,18 +23,23 @@ const MessageThreadSchema = new mongoose.Schema(
 
     // per-user unread counter (key = userId string)
     unreadCounts: { type: Map, of: Number, default: {} },
+
+    // ✅ used when thread is unclaimed (system-wide counselor inbox unread)
+    unassignedUnread: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
 
 MessageThreadSchema.pre("save", function () {
   const s = String(this.studentId || "");
-  const c = String(this.counselorId || "");
+  const c = this.counselorId ? String(this.counselorId) : "";
   const existing = new Set((this.participants || []).map((x) => String(x)));
+
   if (s && !existing.has(s)) this.participants.push(this.studentId);
   if (c && !existing.has(c)) this.participants.push(this.counselorId);
 });
 
-MessageThreadSchema.index({ studentId: 1, counselorId: 1, status: 1 });
+// One open thread per student (simple UX)
+MessageThreadSchema.index({ studentId: 1, status: 1 });
 
 module.exports = mongoose.model("MessageThread", MessageThreadSchema);
