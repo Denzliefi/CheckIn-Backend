@@ -69,6 +69,11 @@ function initSocket(httpServer) {
     // personal room (we'll emit to this for personalized payloads)
     socket.join(`user:${userId}`);
 
+    // counselors get system-wide inbox updates (metadata only)
+    if (String(socket.user?.role || "").toLowerCase() === "counselor") {
+      socket.join("role:counselor");
+    }
+
     // auto-join all thread rooms for this user
     try {
       const threads = await MessageThread.find({ participants: userId }).select("_id").lean();
@@ -78,16 +83,29 @@ function initSocket(httpServer) {
     }
 
     socket.on("thread:join", async ({ threadId } = {}) => {
-      try {
-        if (!threadId) return;
-        const t = await MessageThread.findById(threadId).select("participants").lean();
-        const ok = t?.participants?.some((p) => String(p) === String(userId));
-        if (!ok) return;
-        socket.join(`thread:${threadId}`);
-      } catch {
-        // ignore
-      }
-    });
+  try {
+    if (!threadId) return;
+
+    const role = String(socket.user?.role || "").toLowerCase();
+
+    // Counselors can join any open thread they view (system-wide read access)
+    if (role === "counselor") {
+      const t = await MessageThread.findById(threadId).select("_id status").lean();
+      if (!t || t.status !== "open") return;
+      socket.join(`thread:${threadId}`);
+      return;
+    }
+
+    // Students (and others) can only join threads they participate in
+    const t = await MessageThread.findById(threadId).select("participants status").lean();
+    const ok = t?.status === "open" && t?.participants?.some((p) => String(p) === String(userId));
+    if (!ok) return;
+
+    socket.join(`thread:${threadId}`);
+  } catch {
+    // ignore
+  }
+});
   });
 
   return ioInstance;
