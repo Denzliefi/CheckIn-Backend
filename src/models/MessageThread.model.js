@@ -23,6 +23,10 @@ const MessageThreadSchema = new mongoose.Schema(
 
     status: { type: String, enum: ["open", "closed"], default: "open", index: true },
 
+    // ✅ Thread closure metadata
+    closedAt: { type: Date, default: null },
+    closedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+
     lastMessage: { type: String, default: "" },
     lastMessageAt: { type: Date, default: null },
 

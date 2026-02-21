@@ -16,4 +16,7 @@ router.post("/threads/:threadId/messages", protect, controller.sendMessage);
 // Read
 router.post("/threads/:threadId/read", protect, controller.markRead);
 
+// Close
+router.post("/threads/:threadId/close", protect, controller.closeThread);
+
 module.exports = router;

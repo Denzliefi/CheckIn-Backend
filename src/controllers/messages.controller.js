@@ -124,6 +124,8 @@ function threadDto(thread, { viewer, includeMessages = false, messages = [] } = 
     identityLocked: !!t.identityLocked,
     identityLockedAt: t.identityLockedAt || null,
     status: t.status,
+    closedAt: t.closedAt || null,
+    closedBy: t.closedBy || null,
     lastMessage: t.lastMessage || "",
     lastMessageAt: t.lastMessageAt || t.updatedAt,
     unreadCounts: unreadCountsObj,
@@ -147,7 +149,7 @@ exports.listThreads = async (req, res, next) => {
     const limit = Number(req.query.limit || 40);
 
     const q = isCounselor(viewer)
-      ? { status: "open" } // ✅ system-wide for counselors
+      ? { status: { $in: ["open", "closed"] } } // ✅ counselors see open + closed
       : { studentId: viewer._id, status: "open" };
 
     const threads = await MessageThread.find(q)
@@ -509,6 +511,77 @@ exports.markRead = async (req, res, next) => {
     } catch {}
 
     return res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+// POST /api/messages/threads/:threadId/close
+// - Student can close their own thread
+// - Counselor can close only if they are the assigned counselor
+exports.closeThread = async (req, res, next) => {
+  try {
+    const viewer = req.user;
+    const threadId = asId(req.params.threadId);
+    if (!threadId) {
+      res.status(400);
+      throw new Error("Invalid thread id");
+    }
+
+    const thread = await MessageThread.findById(threadId).select("studentId counselorId status").lean();
+    if (!thread) {
+      res.status(404);
+      throw new Error("Thread not found");
+    }
+
+    if (!isCounselor(viewer)) {
+      if (String(thread.studentId) !== String(viewer._id)) {
+        res.status(403);
+        throw new Error("Forbidden");
+      }
+    } else {
+      if (!thread.counselorId) {
+        res.status(403);
+        throw new Error("Unclaimed conversations can only be closed by the student.");
+      }
+      if (String(thread.counselorId) !== String(viewer._id)) {
+        res.status(403);
+        throw new Error("Forbidden");
+      }
+    }
+
+    if (String(thread.status) === "closed") {
+      return res.json({ ok: true, status: "closed" });
+    }
+
+    const studentId = String(thread.studentId);
+    const counselorId = thread.counselorId ? String(thread.counselorId) : null;
+
+    const setOps = {
+      status: "closed",
+      closedAt: new Date(),
+      closedBy: viewer._id,
+      unassignedUnread: 0,
+      [`unreadCounts.${studentId}`]: 0,
+    };
+    if (counselorId) setOps[`unreadCounts.${counselorId}`] = 0;
+
+    await MessageThread.findByIdAndUpdate(threadId, { $set: setOps }, { new: false });
+
+    try {
+      const io = getIO();
+      const tid = String(threadId);
+      const payload = { threadId: tid, status: "closed" };
+
+      io.to(`thread:${tid}`).emit("thread:closed", payload);
+      io.to(`user:${studentId}`).emit("thread:closed", payload);
+      if (counselorId) io.to(`user:${counselorId}`).emit("thread:closed", payload);
+
+      io.to("role:counselor").emit("thread:update", { threadId: tid });
+    } catch {}
+
+    return res.json({ ok: true, status: "closed" });
   } catch (err) {
     next(err);
   }
