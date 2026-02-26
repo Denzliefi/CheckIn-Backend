@@ -83,29 +83,46 @@ function initSocket(httpServer) {
     }
 
     socket.on("thread:join", async ({ threadId } = {}) => {
-  try {
-    if (!threadId) return;
+      try {
+        if (!threadId) return;
 
-    const role = String(socket.user?.role || "").toLowerCase();
+        const role = String(socket.user?.role || "").toLowerCase();
 
-    // Counselors can join any open thread they view (system-wide read access)
-    if (role === "counselor") {
-      const t = await MessageThread.findById(threadId).select("_id status").lean();
-      if (!t || t.status !== "open") return;
-      socket.join(`thread:${threadId}`);
-      return;
-    }
+        // ✅ PATCH (privacy): Counselors may join only:
+        //  - unclaimed OPEN threads, OR
+        //  - threads claimed by THEM (open + closed history)
+        if (role === "counselor") {
+          const t = await MessageThread.findById(threadId)
+            .select("_id status counselorId")
+            .lean();
+          if (!t) return;
 
-    // Students (and others) can only join threads they participate in
-    const t = await MessageThread.findById(threadId).select("participants status").lean();
-    const ok = t?.status === "open" && t?.participants?.some((p) => String(p) === String(userId));
-    if (!ok) return;
+          const status = String(t.status || "open").toLowerCase();
+          const assignedId = t.counselorId ? String(t.counselorId) : "";
 
-    socket.join(`thread:${threadId}`);
-  } catch {
-    // ignore
-  }
-});
+          if (!assignedId) {
+            if (status !== "open") return;
+            socket.join(`thread:${threadId}`);
+            return;
+          }
+
+          if (assignedId !== String(userId)) return;
+          socket.join(`thread:${threadId}`);
+          return;
+        }
+
+        // Students (and others) can only join threads they participate in (and only while open)
+        const t = await MessageThread.findById(threadId).select("participants status").lean();
+        const ok =
+          String(t?.status || "open").toLowerCase() === "open" &&
+          t?.participants?.some((p) => String(p) === String(userId));
+        if (!ok) return;
+
+        socket.join(`thread:${threadId}`);
+      } catch {
+        // ignore
+      }
+    });
   });
 
   return ioInstance;

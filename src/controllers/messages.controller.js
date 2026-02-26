@@ -97,8 +97,24 @@ async function getMessagesForThread(threadId, limit = 40) {
 
 function canAccessThread(thread, viewer) {
   if (!viewer?._id) return false;
-  if (isCounselor(viewer)) return true; // system-wide read
-  return String(thread.studentId?._id || thread.studentId) === String(viewer._id);
+
+  const viewerId = String(viewer._id);
+  const status = String(thread?.status || "open").toLowerCase();
+
+  // ✅ PATCH (privacy): counselors may access only:
+  //  - unclaimed OPEN threads (triage), OR
+  //  - threads claimed by THEM (open + closed history)
+  if (isCounselor(viewer)) {
+    const assignedId = thread?.counselorId
+      ? String(thread.counselorId?._id || thread.counselorId)
+      : "";
+
+    if (assignedId) return assignedId === viewerId;
+    return status === "open";
+  }
+
+  // Students may access only their own thread
+  return String(thread.studentId?._id || thread.studentId) === viewerId;
 }
 
 function threadDto(thread, { viewer, includeMessages = false, messages = [] } = {}) {
@@ -107,6 +123,14 @@ function threadDto(thread, { viewer, includeMessages = false, messages = [] } = 
 
   const unreadCountsObj = mapToObject(t.unreadCounts);
   const isUnclaimed = !t.counselorId;
+
+  // ✅ PATCH (privacy): for counselors viewing UNCLAIMED threads, do not leak
+  // student identity via participants[] or unreadCounts keys.
+  const assignedId = t.counselorId
+    ? String(t.counselorId?._id || t.counselorId)
+    : "";
+  const isAssignedToMe = assignedId && assignedId === myId;
+  const hideSensitive = isCounselor(viewer) && isUnclaimed && !isAssignedToMe;
 
   // counselor inbox unread: use unassignedUnread when unclaimed
   const unreadForMe = isCounselor(viewer)
@@ -118,7 +142,7 @@ function threadDto(thread, { viewer, includeMessages = false, messages = [] } = 
     studentId: t.studentId,
     counselorId: t.counselorId,
     claimedAt: t.claimedAt || null,
-    participants: (t.participants || []).map(String),
+    participants: hideSensitive ? [] : (t.participants || []).map(String),
     anonymous: !!t.anonymous,
     identityMode: String(t.identityMode || (t.anonymous ? "anonymous" : "student")),
     identityLocked: !!t.identityLocked,
@@ -128,7 +152,7 @@ function threadDto(thread, { viewer, includeMessages = false, messages = [] } = 
     closedBy: t.closedBy || null,
     lastMessage: t.lastMessage || "",
     lastMessageAt: t.lastMessageAt || t.updatedAt,
-    unreadCounts: unreadCountsObj,
+    unreadCounts: hideSensitive ? {} : unreadCountsObj,
     unassignedUnread: Number(t.unassignedUnread || 0),
     unreadForMe,
     messages: includeMessages ? messages : undefined,
@@ -145,12 +169,22 @@ function threadDto(thread, { viewer, includeMessages = false, messages = [] } = 
 exports.listThreads = async (req, res, next) => {
   try {
     const viewer = req.user;
-    const includeMessages = String(req.query.includeMessages ?? "1") !== "0";
+    const requestedInclude = String(req.query.includeMessages ?? "1") !== "0";
+    // ✅ PATCH (privacy): counselors cannot bulk-download message history from list.
+    const includeMessages = isCounselor(viewer) ? false : requestedInclude;
     const limit = Number(req.query.limit || 40);
 
+    const viewerId = viewer?._id;
     const q = isCounselor(viewer)
-      ? { status: { $in: ["open", "closed"] } } // ✅ counselors see open + closed
-      : { studentId: viewer._id, status: "open" };
+      ? {
+          $or: [
+            // Unclaimed OPEN threads, but only after at least one real message exists.
+            { status: "open", counselorId: null, lastMessageAt: { $ne: null } },
+            // My claimed threads (open + closed history)
+            { counselorId: viewerId, status: { $in: ["open", "closed"] } },
+          ],
+        }
+      : { studentId: viewerId, status: "open" };
 
     const threads = await MessageThread.find(q)
       .sort({ lastMessageAt: -1, updatedAt: -1 })
@@ -228,12 +262,8 @@ exports.ensureThread = async (req, res, next) => {
       .populate("counselorId", "fullName email counselorCode role campus")
       .lean();
 
-    // ✅ notify counselors system-wide (metadata only)
-    try {
-      const io = getIO();
-      io.to("role:counselor").emit("thread:created", { threadId: String(created._id) });
-      io.to("role:counselor").emit("thread:update", { threadId: String(created._id) });
-    } catch {}
+    // ✅ PATCH: do NOT notify counselors on thread creation.
+    // Counselors should only be notified after the FIRST message is sent.
 
     return res.status(201).json({ item: threadDto(populated, { viewer, includeMessages: true, messages: [] }) });
   } catch (err) {
@@ -432,35 +462,28 @@ if (!isCounselor(viewer)) {
       const io = getIO();
       const tid = String(threadId);
 
-      // only people who are supposed to receive the message
-      io.to(`thread:${tid}`).emit("message:new", {
+      // ✅ PATCH (privacy): do NOT emit message payloads to thread rooms.
+      // Deliver messages only to the actual participants via user rooms.
+      const evt = {
         threadId: tid,
         message: messageDto(msgDoc),
         thread: payloadThread,
-      });
+      };
 
-      io.to(`user:${studentId}`).emit("message:new", {
-        threadId: tid,
-        message: messageDto(msgDoc),
-        thread: payloadThread,
-      });
+      io.to(`user:${studentId}`).emit("message:new", evt);
 
       if (updatedThread?.counselorId) {
-        io.to(`user:${String(updatedThread.counselorId)}`).emit("message:new", {
-          threadId: tid,
-          message: messageDto(msgDoc),
-          thread: payloadThread,
-        });
+        io.to(`user:${String(updatedThread.counselorId)}`).emit("message:new", evt);
       }
 
       // System-wide counselor metadata updates (no message body)
+      // ✅ PATCH (UX): emit thread:update ONCE, and emit thread:claimed when claim happens.
       io.to("role:counselor").emit("thread:update", { threadId: tid });
-
       if (claimedNow) {
-        io.to("role:counselor").emit("thread:claimed", { threadId: tid, counselorId: viewerId });
-      } else {
-        // still useful to ping list
-        io.to("role:counselor").emit("thread:update", { threadId: tid });
+        io.to("role:counselor").emit("thread:claimed", {
+          threadId: tid,
+          counselorId: viewerId,
+        });
       }
     } catch {}
 
@@ -506,7 +529,6 @@ exports.markRead = async (req, res, next) => {
       const io = getIO();
       const tid = String(threadId);
       io.to(`user:${userId}`).emit("thread:read", { threadId: tid, userId });
-      io.to(`thread:${tid}`).emit("thread:read", { threadId: tid, userId });
       io.to("role:counselor").emit("thread:update", { threadId: tid });
     } catch {}
 
@@ -574,7 +596,6 @@ exports.closeThread = async (req, res, next) => {
       const tid = String(threadId);
       const payload = { threadId: tid, status: "closed" };
 
-      io.to(`thread:${tid}`).emit("thread:closed", payload);
       io.to(`user:${studentId}`).emit("thread:closed", payload);
       if (counselorId) io.to(`user:${counselorId}`).emit("thread:closed", payload);
 
