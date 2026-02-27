@@ -188,8 +188,8 @@ exports.listThreads = async (req, res, next) => {
 
     const threads = await MessageThread.find(q)
       .sort({ lastMessageAt: -1, updatedAt: -1 })
-      .populate("studentId", "fullName email studentNumber role campus")
-      .populate("counselorId", "fullName email counselorCode role campus")
+      .populate("studentId", "fullName email studentNumber role campus avatarUrl")
+      .populate("counselorId", "fullName email counselorCode role campus avatarUrl")
       .lean();
 
     const out = [];
@@ -217,8 +217,8 @@ exports.ensureThread = async (req, res, next) => {
     const anonymous = !!req.body?.anonymous;
 
     const existing = await MessageThread.findOne({ studentId: viewer._id, status: "open" })
-      .populate("studentId", "fullName email studentNumber role campus")
-      .populate("counselorId", "fullName email counselorCode role campus")
+      .populate("studentId", "fullName email studentNumber role campus avatarUrl")
+      .populate("counselorId", "fullName email counselorCode role campus avatarUrl")
       .lean();
 
     if (existing) {
@@ -233,8 +233,8 @@ exports.ensureThread = async (req, res, next) => {
     );
 
     const refreshed = await MessageThread.findById(existing._id)
-      .populate("studentId", "fullName email studentNumber role campus")
-      .populate("counselorId", "fullName email counselorCode role campus")
+      .populate("studentId", "fullName email studentNumber role campus avatarUrl")
+      .populate("counselorId", "fullName email counselorCode role campus avatarUrl")
       .lean();
 
     return res.json({ item: threadDto(refreshed, { viewer, includeMessages: true, messages: msgs }) });
@@ -258,8 +258,8 @@ exports.ensureThread = async (req, res, next) => {
     });
 
     const populated = await MessageThread.findById(created._id)
-      .populate("studentId", "fullName email studentNumber role campus")
-      .populate("counselorId", "fullName email counselorCode role campus")
+      .populate("studentId", "fullName email studentNumber role campus avatarUrl")
+      .populate("counselorId", "fullName email counselorCode role campus avatarUrl")
       .lean();
 
     // ✅ PATCH: do NOT notify counselors on thread creation.
@@ -282,8 +282,8 @@ exports.getThread = async (req, res, next) => {
     }
 
     const thread = await MessageThread.findById(threadId)
-      .populate("studentId", "fullName email studentNumber role campus")
-      .populate("counselorId", "fullName email counselorCode role campus")
+      .populate("studentId", "fullName email studentNumber role campus avatarUrl")
+      .populate("counselorId", "fullName email counselorCode role campus avatarUrl")
       .lean();
 
     if (!thread) {
@@ -448,12 +448,67 @@ if (!isCounselor(viewer)) {
       { new: true }
     ).lean();
 
+    // Build lightweight thread snapshots for realtime (so UI can show avatars without refresh)
+    let counselorSnap = null;
+    try {
+      if (updatedThread?.counselorId) {
+        const cid = String(updatedThread.counselorId);
+
+        // avoid extra DB hit when sender is the counselor
+        if (isCounselor(viewer) && String(viewer._id) === cid) {
+          counselorSnap = {
+            _id: cid,
+            fullName: viewer.fullName || "",
+            avatarUrl: viewer.avatarUrl || "",
+          };
+        } else {
+          const c = await User.findById(cid).select("_id fullName avatarUrl").lean();
+          if (c) {
+            counselorSnap = {
+              _id: String(c._id),
+              fullName: c.fullName || "",
+              avatarUrl: c.avatarUrl || "",
+            };
+          }
+        }
+      }
+    } catch {}
+
+    let studentSnap = null;
+    try {
+      if (studentId && !updatedThread?.anonymous) {
+        // avoid extra DB hit when sender is the student
+        if (!isCounselor(viewer) && String(viewer._id) === String(studentId)) {
+          studentSnap = {
+            _id: String(viewer._id),
+            fullName: viewer.fullName || "",
+            studentNumber: viewer.studentNumber || "",
+            avatarUrl: viewer.avatarUrl || "",
+          };
+        } else {
+          const s = await User.findById(studentId).select("_id fullName studentNumber avatarUrl").lean();
+          if (s) {
+            studentSnap = {
+              _id: String(s._id),
+              fullName: s.fullName || "",
+              studentNumber: s.studentNumber || "",
+              avatarUrl: s.avatarUrl || "",
+            };
+          }
+        }
+      }
+    } catch {}
+
     const payloadThread = updatedThread
       ? {
           _id: String(updatedThread._id),
           counselorId: updatedThread.counselorId ? String(updatedThread.counselorId) : null,
           unreadCounts: mapToObject(updatedThread.unreadCounts),
           unassignedUnread: Number(updatedThread.unassignedUnread || 0),
+          anonymous: !!updatedThread.anonymous,
+          identityMode: String(updatedThread.identityMode || (updatedThread.anonymous ? "anonymous" : "student")),
+          counselor: counselorSnap,
+          student: studentSnap,
         }
       : { _id: String(threadId) };
 
