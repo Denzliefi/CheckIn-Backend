@@ -16,7 +16,8 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: MAX_FILE_SIZE,
-    files: 1,
+    // allow either 'avatar' OR legacy 'file' key (but we will enforce ONLY ONE total below)
+    files: 2,
   },
   fileFilter: (req, file, cb) => {
     if (!file?.mimetype || !ALLOWED_MIME.has(file.mimetype)) {
@@ -34,7 +35,26 @@ function avatarUpload(req, res, next) {
     { name: "avatar", maxCount: 1 },
     { name: "file", maxCount: 1 },
   ])(req, res, (err) => {
-    if (!err) return next();
+    if (!err) {
+      const aCount = req.files?.avatar?.length || 0;
+      const fCount = req.files?.file?.length || 0;
+      const total = aCount + fCount;
+
+      if (total === 0) {
+        return res.status(400).json({
+          message: "No image uploaded. Please attach an image file.",
+        });
+      }
+
+      // If client accidentally submits both 'avatar' and 'file', reject to avoid ambiguity.
+      if (total > 1) {
+        return res.status(400).json({
+          message: "Only one image file is allowed.",
+        });
+      }
+
+      return next();
+    }
 
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(413).json({
@@ -45,6 +65,13 @@ function avatarUpload(req, res, next) {
     if (err.code === "INVALID_FILE_TYPE") {
       return res.status(415).json({
         message: "Invalid file type. Only image files are allowed.",
+      });
+    }
+
+    // Multer can throw LIMIT_FILE_COUNT as "Too many files" — translate into a clear message.
+    if (err.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({
+        message: "Only one image file is allowed.",
       });
     }
 
