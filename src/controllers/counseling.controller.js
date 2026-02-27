@@ -78,26 +78,40 @@ exports.createMeet = async (req, res) => {
 
     // =========================
     // B) One booking per week (Mon–Sun, Asia/Manila) based on the SESSION date
+    //
+    // Option B:
+    // - A non-cancelled MEET inside the week blocks booking
+    // - Cancelled MEETs do NOT block booking until the student cancels 3× in that week
     // =========================
     const { weekStart, weekEnd } = getPHWeekRange(date);
 
-    const weekly = await CounselingRequest.findOne({
+    const weekDocs = await CounselingRequest.find({
       userId,
       type: "MEET",
       date: { $gte: weekStart, $lte: weekEnd },
     })
-      .select("_id status date time")
+      .select("status cancelledBy")
       .lean();
 
-    if (weekly) {
+    const hasNonCancelled = weekDocs.some((d) => String(d?.status || "") !== "Cancelled");
+
+    // Count only student-initiated cancellations (legacy docs without cancelledBy count as Student)
+    const studentCancelCount = weekDocs.filter((d) => {
+      const st = String(d?.status || "");
+      if (st !== "Cancelled") return false;
+      const by = String(d?.cancelledBy || "Student");
+      return by === "Student";
+    }).length;
+
+    if (hasNonCancelled || studentCancelCount >= 3) {
       return res.status(409).json({
         code: "WEEKLY_LIMIT",
         message: "Weekly limit reached. You can only book one counseling session per week.",
-        meta: { weekStart, weekEnd },
+        meta: { weekStart, weekEnd, cancellationsUsed: studentCancelCount },
       });
     }
 
-    // counselorId optional: if missing, auto-assign first available counselor for that slot
+// counselorId optional: if missing, auto-assign first available counselor for that slot
     let counselor = counselorId ? toObjectIdOrEmpty(counselorId) : null;
 
     if (!counselor) {
@@ -270,12 +284,37 @@ exports.cancelRequest = async (req, res) => {
     if (String(doc.userId) !== String(req.user?.id)) {
       return res.status(403).json({ message: "Forbidden." });
     }
-    if (doc.status !== "Pending") {
-      return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be cancelled." });
+
+    const status = String(doc.status || "");
+
+    // Option B cancel rules:
+    // - Pending: allowed anytime
+    // - Approved/Rescheduled: allowed only if >= 24 hours before the session start (PH time)
+    // - otherwise: not allowed
+    const allowIf = new Set(["Pending", "Approved", "Rescheduled"]);
+    if (!allowIf.has(status)) {
+      return res.status(400).json({ code: "INVALID_STATUS", message: "This request cannot be cancelled." });
+    }
+
+    if ((status === "Approved" || status === "Rescheduled") && doc.type === "MEET") {
+      const now = phNow();
+      const slotDt = DateTime.fromISO(`${doc.date}T${doc.time}`, { zone: PH_TZ });
+      if (!slotDt.isValid) {
+        return res.status(400).json({ code: "INVALID_TIME", message: "Invalid schedule on this request." });
+      }
+
+      const cutoff = now.plus({ hours: 24 });
+      if (slotDt < cutoff) {
+        return res.status(400).json({
+          code: "CANCEL_TOO_LATE",
+          message: "Too late to cancel. Please contact the counselor.",
+        });
+      }
     }
 
     doc.status = "Cancelled";
     doc.cancelledAt = new Date();
+    doc.cancelledBy = "Student";
     await doc.save();
 
     return res.json(formatRequest(doc));
@@ -902,6 +941,7 @@ function formatRequestLean(o) {
     notes: o.notes,
 
     cancelledAt: o.cancelledAt,
+    cancelledBy: o.cancelledBy,
     rescheduledAt: o.rescheduledAt,
     rescheduledBy: o.rescheduledBy,
     rescheduledFrom: o.rescheduledFrom,

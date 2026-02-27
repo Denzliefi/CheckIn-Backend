@@ -61,6 +61,10 @@ const CounselingRequestSchema = new mongoose.Schema(
 
 
 
+
+    // ✅ who initiated the cancellation (used for weekly cancellation allotment)
+    cancelledBy: { type: String, enum: ["Student", "Counselor", "Admin"], default: "Student" },
+
 // ✅ reschedule tracking (MEET)
 rescheduledAt: { type: Date },
 rescheduledBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
