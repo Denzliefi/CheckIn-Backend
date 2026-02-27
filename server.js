@@ -7,6 +7,8 @@ dotenv.config();
 
 const http = require("http");
 const express = require("express");
+const path = require("path");
+const fs = require("fs");
 const cors = require("cors");
 const morgan = require("morgan");
 
@@ -41,6 +43,24 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // optional but helpful
 app.use(morgan("dev"));
+
+/* ======================
+   STATIC UPLOADS
+   - Serves /uploads/* (avatars, etc.)
+====================== */
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+app.use(
+  "/uploads",
+  express.static(UPLOADS_DIR, {
+    setHeaders(res) {
+      // reduce content-type sniffing risk
+      res.setHeader("X-Content-Type-Options", "nosniff");
+    },
+  })
+);
+
 
 /* ======================
    ROUTES

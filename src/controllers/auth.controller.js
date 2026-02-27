@@ -173,6 +173,7 @@ async function register(req, res) {
         studentNumber: user.studentNumber,
         course: user.course,
         role: user.role,
+        avatarUrl: user.avatarUrl || "",
       },
     });
   } catch (err) {
@@ -219,6 +220,7 @@ async function login(req, res) {
         studentNumber: user.studentNumber,
         course: user.course,
         role: user.role,
+        avatarUrl: user.avatarUrl || "",
       },
     });
   } catch (err) {
@@ -285,6 +287,7 @@ async function createUser(req, res) {
       course: user.course,
       campus: user.campus,
       role: user.role,
+      avatarUrl: user.avatarUrl || "",
     });
   } catch (err) {
     console.error("ADMIN_CREATEUSER_ERROR:", err);
@@ -395,6 +398,7 @@ async function googleAuth(req, res) {
           studentNumber: user.studentNumber,
           course: user.course,
           role: user.role,
+          avatarUrl: user.avatarUrl || "",
         },
       });
     }
@@ -439,6 +443,7 @@ async function googleAuth(req, res) {
         studentNumber: newUser.studentNumber,
         course: newUser.course,
         role: newUser.role,
+        avatarUrl: newUser.avatarUrl || "",
       },
     });
   } catch (err) {

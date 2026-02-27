@@ -37,6 +37,9 @@ const UserSchema = new mongoose.Schema(
     course: { type: String, trim: true, maxlength: 120 },
     campus: { type: String, trim: true, maxlength: 80 },
 
+    // Profile photo (served from /uploads/... or external URL)
+    avatarUrl: { type: String, trim: true, maxlength: 2048, default: "" },
+
     googleId: { type: String, trim: true, index: true, sparse: true },
 
     password: { type: String, select: false }, // optional for Google accounts
