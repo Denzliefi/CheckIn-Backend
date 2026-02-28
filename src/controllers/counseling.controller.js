@@ -93,7 +93,8 @@ exports.createMeet = async (req, res) => {
       .select("status cancelledBy")
       .lean();
 
-    const hasNonCancelled = weekDocs.some((d) => String(d?.status || "") !== "Cancelled");
+    const blockingStatuses = new Set(["Pending", "Approved", "Rescheduled", "Completed"]); // Disapproved does NOT block weekly booking
+    const hasBlocking = weekDocs.some((d) => blockingStatuses.has(String(d?.status || "")));
 
     // Count only student-initiated cancellations (legacy docs without cancelledBy count as Student)
     const studentCancelCount = weekDocs.filter((d) => {
@@ -103,7 +104,7 @@ exports.createMeet = async (req, res) => {
       return by === "Student";
     }).length;
 
-    if (hasNonCancelled || studentCancelCount >= 3) {
+    if (hasBlocking || studentCancelCount >= 3) {
       return res.status(409).json({
         code: "WEEKLY_LIMIT",
         message: "Weekly limit reached. You can only book one counseling session per week.",
