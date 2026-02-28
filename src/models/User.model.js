@@ -44,6 +44,12 @@ const UserSchema = new mongoose.Schema(
 
     password: { type: String, select: false }, // optional for Google accounts
 
+
+// Password reset (local accounts)
+passwordResetTokenHash: { type: String, select: false, index: true },
+passwordResetExpires: { type: Date, select: false },
+passwordResetRequestedAt: { type: Date, select: false },
+
     // Optional counselor profile fields (used when role === "Counselor")
     counselorCode: { type: String, trim: true, maxlength: 32, index: true, sparse: true },
     specialty: [{ type: String, trim: true, maxlength: 80 }],

@@ -3,6 +3,7 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User.model");
 
+const { requestPasswordReset, resetPasswordWithToken } = require("../services/auth.service");
 /* =======================
    Helpers (sanitize + normalize)
 ======================= */
@@ -452,6 +453,61 @@ async function googleAuth(req, res) {
   }
 }
 
+/* =======================
+   FORGOT PASSWORD
+   POST /api/auth/forgot-password
+   Body: { email }
+   NOTE: Always returns a generic success message to avoid account enumeration.
+======================= */
+async function forgotPassword(req, res) {
+  try {
+    const email = String(req.body.email ?? "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ message: "Email is required." });
+
+    // Service handles: local-only accounts, rate limiting, token generation, email sending
+    await requestPasswordReset(email);
+
+    return res.json({
+      message:
+        "If an account exists for that email, we sent a password reset link. Please check your inbox.",
+    });
+  } catch (err) {
+    console.error("FORGOT_PASSWORD_ERROR:", err);
+    // Still return generic message (do not leak existence or internal errors)
+    return res.json({
+      message:
+        "If an account exists for that email, we sent a password reset link. Please check your inbox.",
+    });
+  }
+}
+
+/* =======================
+   RESET PASSWORD
+   POST /api/auth/reset-password
+   Body: { token, password }
+======================= */
+async function resetPassword(req, res) {
+  try {
+    const token = String(req.body.token ?? "").trim();
+    const password = String(req.body.password ?? "");
+
+    if (!token || !password) {
+      return res.status(400).json({ message: "Token and new password are required." });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ message: "Password must be at least 8 characters." });
+    }
+
+    await resetPasswordWithToken({ token, newPassword: password });
+
+    return res.json({ message: "Password updated successfully. You can now login." });
+  } catch (err) {
+    console.error("RESET_PASSWORD_ERROR:", err);
+    return res.status(400).json({ message: err.message || "Reset link is invalid or expired." });
+  }
+}
+
 module.exports = {
   register,
   login,
@@ -459,4 +515,7 @@ module.exports = {
   createUser,
   googleAuth,
   checkAvailability,
+  forgotPassword,
+  resetPassword,
+
 };

@@ -18,6 +18,8 @@ const {
   checkAvailability,
   getMe,
   createUser,
+  forgotPassword,
+  resetPassword,
 } = require("../controllers/auth.controller");
 
 /**
@@ -52,6 +54,21 @@ router.post(
  * @access  Public
  */
 router.post("/google", googleAuth);
+
+/**
+ * @route   POST /api/auth/forgot-password
+ * @desc    Request password reset (email/password accounts only)
+ * @access  Public
+ */
+router.post("/forgot-password", validate(["email"]), forgotPassword);
+
+/**
+ * @route   POST /api/auth/reset-password
+ * @desc    Reset password using token from email
+ * @access  Public
+ */
+router.post("/reset-password", validate(["token", "password"]), resetPassword);
+
 
 /**
  * @route   GET /api/auth/availability
