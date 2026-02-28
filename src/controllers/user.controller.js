@@ -38,6 +38,10 @@ function isValidEmail(value) {
   const v = String(value || "").trim();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
+function isCounselorRole(role) {
+  return /^counselor$/i.test(String(role || ""));
+}
+
 
 function formatYYYYMM(d) {
   const dt = d ? new Date(d) : null;
@@ -305,6 +309,23 @@ exports.updateMyAvatar = async (req, res, next) => {
         avatarUrl: req.user.avatarUrl,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+/**
+ * Counselor-only avatar upload wrapper
+ * - Use this for Counselor Dashboard Account Settings.
+ * - Students should use the generic /api/users/me/avatar endpoint (if enabled in your UI).
+ */
+exports.updateMyCounselorAvatar = async (req, res, next) => {
+  try {
+    if (!isCounselorRole(req.user?.role)) {
+      return res.status(403).json({ message: "Only counselors can update a profile photo here." });
+    }
+    return exports.updateMyAvatar(req, res, next);
   } catch (err) {
     next(err);
   }
