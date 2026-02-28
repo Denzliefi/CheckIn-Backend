@@ -94,7 +94,23 @@ async function resetPasswordWithToken({ token, newPassword }) {
   await user.save();
 }
 
+async function validatePasswordResetToken(token) {
+  const raw = String(token || "").trim();
+  if (!raw) return false;
+
+  const tokenHash = sha256Hex(raw);
+
+  const user = await User.findOne({
+    passwordResetTokenHash: tokenHash,
+    passwordResetExpires: { $gt: new Date() },
+  }).select("_id");
+
+  return !!user;
+}
+
+
 module.exports = {
   requestPasswordReset,
   resetPasswordWithToken,
+  validatePasswordResetToken,
 };

@@ -20,6 +20,7 @@ const {
   createUser,
   forgotPassword,
   resetPassword,
+  validateResetPasswordToken,
 } = require("../controllers/auth.controller");
 
 /**
@@ -68,6 +69,13 @@ router.post("/forgot-password", validate(["email"]), forgotPassword);
  * @access  Public
  */
 router.post("/reset-password", validate(["token", "password"]), resetPassword);
+
+/**
+ * @route   GET /api/auth/reset-password/validate?token=...
+ * @desc    Validate reset token (used/expired links show proper UI)
+ * @access  Public
+ */
+router.get("/reset-password/validate", validateResetPasswordToken);
 
 
 /**

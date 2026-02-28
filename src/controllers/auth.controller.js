@@ -3,7 +3,11 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User.model");
 
-const { requestPasswordReset, resetPasswordWithToken } = require("../services/auth.service");
+const {
+  requestPasswordReset,
+  resetPasswordWithToken,
+  validatePasswordResetToken,
+} = require("../services/auth.service");
 /* =======================
    Helpers (sanitize + normalize)
 ======================= */
@@ -508,6 +512,40 @@ async function resetPassword(req, res) {
   }
 }
 
+/* =======================
+   VALIDATE RESET TOKEN
+   GET /api/auth/reset-password/validate?token=...
+   Response: { valid: boolean, message?: string }
+======================= */
+async function validateResetPasswordToken(req, res) {
+  try {
+    const token = String(req.query.token ?? "").trim();
+
+    if (!token) {
+      return res.json({
+        valid: false,
+        message: "Expired! Reset link is missing or invalid. Please request a new one.",
+      });
+    }
+
+    const ok = await validatePasswordResetToken(token);
+
+    if (ok) return res.json({ valid: true });
+
+    return res.json({
+      valid: false,
+      message: "Expired! Reset link is invalid or has already been used. Please request a new one.",
+    });
+  } catch (err) {
+    console.error("VALIDATE_RESET_TOKEN_ERROR:", err);
+    return res.json({
+      valid: false,
+      message: "Expired! Reset link is invalid or expired. Please request a new one.",
+    });
+  }
+}
+
+
 module.exports = {
   register,
   login,
@@ -517,5 +555,6 @@ module.exports = {
   checkAvailability,
   forgotPassword,
   resetPassword,
+  validateResetPasswordToken,
 
 };
