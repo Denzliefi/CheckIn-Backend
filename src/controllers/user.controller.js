@@ -30,6 +30,7 @@ exports.getMe = async (req, res, next) => {
       fullName: fullName || "",
       role: u.role || "",
       username: u.username || "",
+      status: String(u.status || "active").toLowerCase(),
     });
   } catch (err) {
     next(err);
@@ -65,7 +66,7 @@ exports.getStudentsForCounselor = async (req, res, next) => {
     const students = await User.find({ role: { $regex: /^student\s*$/i } })
       .sort({ createdAt: -1 })
       .limit(limit)
-      .select("firstName lastName fullName email avatarUrl studentNumber course accountCreation createdAt")
+      .select("firstName lastName fullName email avatarUrl studentNumber course campus status accountCreation createdAt updatedAt")
       .lean();
 
     const items = (students || []).map((u) => {
@@ -86,6 +87,9 @@ exports.getStudentsForCounselor = async (req, res, next) => {
         studentNumber: u.studentNumber || "",
         studentId: u.studentNumber || "",
         course: u.course || "",
+        campus: u.campus || "",
+        status: String(u.status || "active").toLowerCase(),
+        updatedAt: u.updatedAt || null,
         createdAt: created || null,
         createdMonth: formatYYYYMM(created),
       };
@@ -198,6 +202,9 @@ exports.updateStudentForCounselor = async (req, res, next) => {
         studentNumber: saved.studentNumber || "",
         studentId: saved.studentNumber || "",
         course: saved.course || "",
+        campus: saved.campus || "",
+        status: String(saved.status || "active").toLowerCase(),
+        updatedAt: saved.updatedAt || null,
         createdAt: created || null,
         createdMonth: formatYYYYMM(created),
       },
@@ -205,8 +212,343 @@ exports.updateStudentForCounselor = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+
+
+/* =========================
+   ADMIN: STUDENT STATUS (LIFECYCLE)
+   PATCH /api/users/students/:userId/status
+   PATCH /api/users/students/status/bulk
+========================= */
+
+const ALLOWED_STUDENT_STATUSES = new Set(["pending", "active", "terminated"]);
+
+exports.updateStudentStatusAdmin = async (req, res, next) => {
+  try {
+    const adminPassword = String(req.body?.adminPassword || "").trim();
+    const nextStatus = String(req.body?.status || "").trim().toLowerCase();
+
+    if (!adminPassword) {
+      res.status(400);
+      throw new Error("Admin password is required.");
+    }
+    if (!ALLOWED_STUDENT_STATUSES.has(nextStatus)) {
+      res.status(400);
+      throw new Error("Invalid status. Use pending, active, or terminated.");
+    }
+
+    // Verify admin password
+    const admin = await User.findById(req.user?._id).select("+password");
+    if (!admin) {
+      res.status(401);
+      throw new Error("Not authorized.");
+    }
+    const ok = await admin.comparePassword(adminPassword);
+    if (!ok) {
+      res.status(403);
+      throw new Error("Incorrect admin password.");
+    }
+
+    const { userId } = req.params;
+    const student = await User.findById(userId);
+    if (!student) {
+      res.status(404);
+      throw new Error("Student not found.");
+    }
+    if (!/^student\s*$/i.test(String(student.role || ""))) {
+      res.status(400);
+      throw new Error("Target user is not a student.");
+    }
+
+    student.status = nextStatus;
+    await student.save();
+
+    return res.json({
+      id: String(student._id),
+      status: String(student.status || "active").toLowerCase(),
+      updatedAt: student.updatedAt || new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
 };
 
+exports.bulkUpdateStudentStatusAdmin = async (req, res, next) => {
+  try {
+    const adminPassword = String(req.body?.adminPassword || "").trim();
+    const nextStatus = String(req.body?.status || "").trim().toLowerCase();
+    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
+
+    if (!adminPassword) {
+      res.status(400);
+      throw new Error("Admin password is required.");
+    }
+    if (!ALLOWED_STUDENT_STATUSES.has(nextStatus)) {
+      res.status(400);
+      throw new Error("Invalid status. Use pending, active, or terminated.");
+    }
+    if (!userIds.length) {
+      res.status(400);
+      throw new Error("No students selected.");
+    }
+
+    const admin = await User.findById(req.user?._id).select("+password");
+    if (!admin) {
+      res.status(401);
+      throw new Error("Not authorized.");
+    }
+    const ok = await admin.comparePassword(adminPassword);
+    if (!ok) {
+      res.status(403);
+      throw new Error("Incorrect admin password.");
+    }
+
+    const updatedAt = new Date();
+
+    await User.updateMany(
+      { _id: { $in: userIds }, role: { $regex: /^student\s*$/i } },
+      { $set: { status: nextStatus, updatedAt } }
+    );
+
+    return res.json({
+      items: userIds.map((id) => ({
+        id: String(id),
+        status: nextStatus,
+        updatedAt: updatedAt.toISOString(),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+};
+
+/* =========================
+   ADMIN: COUNSELOR MANAGEMENT
+   - Limit: 5 counselors
+   - Create counselor with: fullName, email, counselorId, password
+   - Stores counselorId in counselorCode (existing schema field)
+========================= */
+
+function cmStrip(v) {
+  return String(v ?? "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .replace(/[<>`]/g, "")
+    .trim();
+}
+
+function cmSanitizeFullName(v, max = 80) {
+  const s = cmStrip(v)
+    .replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-\s]/g, "")
+    .replace(/\s{2,}/g, " ");
+  return s.slice(0, max).trim();
+}
+
+function cmSanitizeEmail(v, max = 120) {
+  return cmStrip(v).replace(/\s+/g, "").slice(0, max).toLowerCase();
+}
+
+function cmSanitizeCounselorId(v, max = 20) {
+  return cmStrip(v).replace(/\s+/g, "").slice(0, max).toUpperCase();
+}
+
+function cmIsValidCounselorId(v) {
+  // Expected pattern: C-0001 (>=4 digits)
+  return /^C-\d{4,}$/.test(String(v || "").trim().toUpperCase());
+}
+
+function cmEscapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function cmGenerateUniqueUsername(seed) {
+  let base = cmStrip(seed)
+    .replace(/\s+/g, "")
+    .replace(/[^A-Za-z0-9._]/g, "")
+    .slice(0, 18);
+
+  if (base.length < 6) base = (base + "counselor").slice(0, 18);
+
+  // Ensure within [6..24] by adding suffix
+  for (let i = 0; i < 50; i++) {
+    const suffix = i === 0 ? "" : String(Math.floor(Math.random() * 9000) + 1000);
+    const candidate = (base + suffix).slice(0, 24);
+
+    // case-insensitive uniqueness check
+    const exists = await User.findOne({
+      username: new RegExp(`^${cmEscapeRegex(candidate)}$`, "i"),
+    })
+      .select("_id")
+      .lean();
+
+    if (!exists) return candidate;
+  }
+
+  // last resort
+  return `counselor_${Date.now()}`.slice(0, 24);
+}
+
+async function cmGenerateUniqueStudentNumber(seed) {
+  const base = cmStrip(seed).slice(0, 24);
+  for (let i = 0; i < 50; i++) {
+    const suffix = i === 0 ? "" : `-${Math.floor(Math.random() * 9000) + 1000}`;
+    const candidate = (base + suffix).slice(0, 32);
+    const exists = await User.findOne({ studentNumber: candidate }).select("_id").lean();
+    if (!exists) return candidate;
+  }
+  return (`COUNSELOR-${Date.now()}`).slice(0, 32);
+}
+
+exports.getCounselorsAdmin = async (req, res, next) => {
+  try {
+    const items = await User.find({ role: { $regex: /^counselor\s*$/i } })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .select("fullName email counselorCode createdAt")
+      .lean();
+
+    return res.json({
+      items: (items || []).map((u) => ({
+        _id: u._id,
+        fullName: u.fullName || "",
+        email: u.email || "",
+        counselorId: u.counselorCode || "",
+        counselorCode: u.counselorCode || "",
+        createdAt: u.createdAt || null,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.createCounselorAdmin = async (req, res, next) => {
+  try {
+    const count = await User.countDocuments({ role: { $regex: /^counselor\s*$/i } });
+    if (count >= 5) {
+      res.status(409);
+      throw new Error("Counselor limit reached (5).");
+    }
+
+    const fullName = cmSanitizeFullName(req.body?.fullName);
+    const email = cmSanitizeEmail(req.body?.email);
+    const counselorId = cmSanitizeCounselorId(req.body?.counselorId);
+    const password = String(req.body?.password ?? "")
+      .replace(/[\u0000-\u001F\u007F]/g, "")
+      .trim()
+      .slice(0, 72);
+
+    if (!fullName) {
+      res.status(400);
+      throw new Error("Counselor name is required.");
+    }
+    if (!email || !isValidEmail(email)) {
+      res.status(400);
+      throw new Error("Valid counselor email is required.");
+    }
+    if (!counselorId) {
+      res.status(400);
+      throw new Error("Counselor ID is required.");
+    }
+    if (!cmIsValidCounselorId(counselorId)) {
+      res.status(400);
+      throw new Error("Counselor ID format is invalid. Use C-0001 format.");
+    }
+    if (!password) {
+      res.status(400);
+      throw new Error("Password is required.");
+    }
+    if (password.length < 8) {
+      res.status(400);
+      throw new Error("Password must be at least 8 characters.");
+    }
+
+    // Uniqueness checks with friendly errors
+    const emailExists = await User.findOne({ email }).select("_id").lean();
+    if (emailExists) {
+      res.status(409);
+      throw new Error("Email already exists.");
+    }
+
+    const cidRegex = new RegExp(`^${cmEscapeRegex(counselorId)}$`, "i");
+    const idExists = await User.findOne({ counselorCode: cidRegex }).select("_id").lean();
+    if (idExists) {
+      res.status(409);
+      throw new Error("Counselor ID already exists.");
+    }
+
+    // Generate required fields for this schema
+    const usernameSeed = String(email || "").split("@")[0] || "counselor";
+    const username = await cmGenerateUniqueUsername(usernameSeed);
+    const studentNumber = await cmGenerateUniqueStudentNumber(`COUNSELOR-${counselorId}`);
+
+    const counselor = await User.create({
+      fullName,
+      email,
+      username,
+      studentNumber,
+      password,
+      role: "Counselor",
+      counselorCode: counselorId,
+    });
+
+    return res.status(201).json({
+      item: {
+        _id: counselor._id,
+        fullName: counselor.fullName || "",
+        email: counselor.email || "",
+        counselorId: counselor.counselorCode || "",
+        counselorCode: counselor.counselorCode || "",
+        createdAt: counselor.createdAt || null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.deleteCounselorAdmin = async (req, res, next) => {
+  try {
+    const adminPassword = String(req.body?.adminPassword || "").trim();
+    if (!adminPassword) {
+      res.status(400);
+      throw new Error("Admin password is required.");
+    }
+
+    const admin = await User.findById(req.user?._id).select("+password");
+    if (!admin) {
+      res.status(401);
+      throw new Error("Not authorized.");
+    }
+    if (!admin.password) {
+      res.status(400);
+      throw new Error("Admin account has no password set.");
+    }
+
+    const ok = await admin.comparePassword(adminPassword);
+    if (!ok) {
+      res.status(403);
+      throw new Error("Incorrect admin password.");
+    }
+
+    const { counselorUserId } = req.params;
+    const counselor = await User.findById(counselorUserId);
+    if (!counselor) {
+      res.status(404);
+      throw new Error("Counselor not found.");
+    }
+    if (!/^counselor\s*$/i.test(String(counselor.role || ""))) {
+      res.status(400);
+      throw new Error("Target user is not a counselor.");
+    }
+
+    await User.deleteOne({ _id: counselor._id });
+
+    return res.json({ message: "Counselor deleted." });
+  } catch (err) {
+    next(err);
+  }
+};
 /* =========================
    PROFILE PHOTO (AVATAR)
    - 5MB max (enforced by multer)

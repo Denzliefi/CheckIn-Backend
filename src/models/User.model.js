@@ -55,6 +55,25 @@ passwordResetRequestedAt: { type: Date, select: false },
     specialty: [{ type: String, trim: true, maxlength: 80 }],
 
     role: { type: String, default: "Student" },
+
+    /**
+     * Student lifecycle status:
+     * - pending: not verified
+     * - active: enrolled / full access
+     * - terminated: not enrolled
+     */
+    status: {
+      type: String,
+      enum: ["pending", "active", "terminated"],
+      trim: true,
+      lowercase: true,
+      index: true,
+      default: function () {
+        const role = String(this.role || "Student").trim().toLowerCase();
+        return role === "student" ? "pending" : "active";
+      },
+    },
+
     accountCreation: { type: Date, default: Date.now },
   },
   { timestamps: true }

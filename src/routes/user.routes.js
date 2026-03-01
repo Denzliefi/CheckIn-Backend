@@ -5,7 +5,18 @@ const router = express.Router();
 const { protect } = require("../middleware/auth.middleware");
 const { avatarUpload } = require("../middleware/upload.middleware");
 const { requireRole } = require("../middleware/role.middleware");
-const { getMe, updateMyAvatar, updateMyCounselorAvatar, getStudentsForCounselor, updateStudentForCounselor } = require("../controllers/user.controller");
+const { validate } = require("../middleware/validate.middleware");
+
+const {
+  getMe,
+  updateMyAvatar,
+  updateMyCounselorAvatar,
+  getStudentsForCounselor,
+  updateStudentForCounselor,
+  getCounselorsAdmin,
+  createCounselorAdmin,
+  deleteCounselorAdmin,
+} = require("../controllers/user.controller");
 
 router.get("/me", protect, getMe);
 
@@ -13,11 +24,29 @@ router.get("/me", protect, getMe);
 router.put("/me/avatar", protect, avatarUpload, updateMyAvatar);
 router.post("/me/avatar", protect, avatarUpload, updateMyAvatar);
 
-
 // Counselor-only profile photo upload (used by Counselor Dashboard Account Settings)
 router.put("/me/counselor/avatar", protect, requireRole("Counselor"), avatarUpload, updateMyCounselorAvatar);
 router.post("/me/counselor/avatar", protect, requireRole("Counselor"), avatarUpload, updateMyCounselorAvatar);
+
+// Students list/edit (Counselor + Admin)
 router.get("/students", protect, requireRole("Counselor", "Admin"), getStudentsForCounselor);
 router.patch("/students/:userId", protect, requireRole("Counselor", "Admin"), updateStudentForCounselor);
+
+// Counselor management (Admin)
+router.get("/counselors", protect, requireRole("Admin"), getCounselorsAdmin);
+router.post(
+  "/counselors",
+  protect,
+  requireRole("Admin"),
+  validate(["fullName", "email", "counselorId", "password"]),
+  createCounselorAdmin
+);
+router.delete(
+  "/counselors/:counselorUserId",
+  protect,
+  requireRole("Admin"),
+  validate(["adminPassword"]),
+  deleteCounselorAdmin
+);
 
 module.exports = router;

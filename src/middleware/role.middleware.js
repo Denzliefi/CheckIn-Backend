@@ -1,35 +1,22 @@
+// backend/src/middleware/role.middleware.js
 function requireRole(...allowedRoles) {
+  const allowed = new Set(allowedRoles.map((r) => String(r || "").trim().toLowerCase()));
+
   return (req, res, next) => {
-    // because protect() sets req.user from DB
-    const role = req.user?.role;
+    const role = String(req.user?.role || "").trim().toLowerCase();
 
     if (!role) {
       res.status(403);
       return next(new Error("Access denied: no role assigned"));
     }
 
-    // normalize optional (in case your DB role uses lowercase)
-    const normalized = String(role).toLowerCase();
-    const allowed = allowedRoles.map((r) => String(r).toLowerCase());
-
-    if (!allowed.includes(normalized)) {
+    if (!allowed.has(role)) {
       res.status(403);
       return next(new Error("Access denied: insufficient role"));
     }
 
-    next();
+    return next();
   };
 }
 
 module.exports = { requireRole };
-
-exports.requireRole = (...allowed) => {
-  const allowedSet = new Set(allowed.map(String));
-  return (req, res, next) => {
-    const role = String(req.user?.role || "");
-    if (!role || !allowedSet.has(role)) {
-      return res.status(403).json({ message: "Forbidden." });
-    }
-    return next();
-  };
-};

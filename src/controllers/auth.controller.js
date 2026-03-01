@@ -163,6 +163,7 @@ async function register(req, res) {
       studentNumber,
       course,
       password,
+      status: "pending",
     });
 
     const token = signToken(user._id);
@@ -178,8 +179,10 @@ async function register(req, res) {
         username: user.username,
         studentNumber: user.studentNumber,
         course: user.course,
+        campus: user.campus || "",
         role: user.role,
         avatarUrl: user.avatarUrl || "",
+        status: String(user.status || "active").toLowerCase(),
       },
     });
   } catch (err) {
@@ -225,8 +228,10 @@ async function login(req, res) {
         username: user.username,
         studentNumber: user.studentNumber,
         course: user.course,
+        campus: user.campus || "",
         role: user.role,
         avatarUrl: user.avatarUrl || "",
+        status: String(user.status || "active").toLowerCase(),
       },
     });
   } catch (err) {
@@ -282,6 +287,7 @@ async function createUser(req, res) {
       course,
       campus,
       password,
+      status: "pending",
     });
 
     return res.status(201).json({
@@ -294,6 +300,7 @@ async function createUser(req, res) {
       campus: user.campus,
       role: user.role,
       avatarUrl: user.avatarUrl || "",
+      status: String(user.status || "active").toLowerCase(),
     });
   } catch (err) {
     console.error("ADMIN_CREATEUSER_ERROR:", err);
@@ -413,6 +420,7 @@ async function googleAuth(req, res) {
           course: user.course,
           role: user.role,
           avatarUrl: user.avatarUrl || "",
+          status: (user.status || "active").toLowerCase(),
         },
       });
     }
@@ -441,6 +449,7 @@ async function googleAuth(req, res) {
       username,
       studentNumber,
       course,
+      status: "pending",
     });
 
     const token = signToken(newUser._id);
@@ -458,6 +467,7 @@ async function googleAuth(req, res) {
         course: newUser.course,
         role: newUser.role,
         avatarUrl: newUser.avatarUrl || "",
+        status: (newUser.status || "active").toLowerCase(),
       },
     });
   } catch (err) {
