@@ -120,9 +120,10 @@ async function register(req, res) {
   try {
     const firstName = sanitizeName(req.body.firstName);
     const lastName = sanitizeName(req.body.lastName);
-    const fullName =
-      stripDangerousChars(req.body.fullName) || [firstName, lastName].filter(Boolean).join(" ");
     const email = sanitizeEmail(req.body.email);
+
+    // ✅ Enforce: fullName = firstName + lastName (fallbacks only used if names are missing)
+    const fullName = buildFullName({ firstName, lastName, bodyFullName: req.body.fullName, email });
     const username = sanitizeUsername(req.body.username);
     const studentNumber = sanitizeStudentNumber(req.body.studentNumber);
     const course = sanitizeCourse(req.body.course);
@@ -367,7 +368,15 @@ async function googleAuth(req, res) {
       if (googleId && !user.googleId) updates.googleId = googleId;
       if (firstName && (!user.firstName || user.firstName !== firstName)) updates.firstName = firstName;
       if (lastName && (!user.lastName || user.lastName !== lastName)) updates.lastName = lastName;
-      if (fullName && (!user.fullName || user.fullName !== fullName)) updates.fullName = fullName;
+
+      // ✅ Keep DB fullName consistent: fullName must be firstName + lastName.
+      // Never overwrite an existing user's fullName with the email prefix during Google login.
+      const nextFirstName = updates.firstName ?? user.firstName;
+      const nextLastName = updates.lastName ?? user.lastName;
+      if (nextFirstName && nextLastName) {
+        const derivedFullName = `${nextFirstName} ${nextLastName}`.trim();
+        if (derivedFullName && user.fullName !== derivedFullName) updates.fullName = derivedFullName;
+      }
       if (course && (!user.course || user.course !== course)) updates.course = course;
 
       if (usernameInput && usernameInput.length >= 6) {

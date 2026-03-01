@@ -1,3 +1,6 @@
+// backend/src/controllers/user.controller.js
+// NOTE: This is a drop-in replacement for your existing controller.
+
 function splitName(fullName = "") {
   const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
   const firstName = parts[0] || "";
@@ -9,7 +12,11 @@ exports.getMe = async (req, res, next) => {
   try {
     const u = req.user;
 
-    const { firstName, lastName } = splitName(u.fullName);
+    // Prefer stored fields; fallback to splitting fullName
+    const fromFull = splitName(u.fullName);
+    const firstName = String(u.firstName || fromFull.firstName || "").trim();
+    const lastName = String(u.lastName || fromFull.lastName || "").trim();
+    const fullName = String(u.fullName || [firstName, lastName].filter(Boolean).join(" ")).trim();
 
     res.json({
       firstName,
@@ -19,8 +26,8 @@ exports.getMe = async (req, res, next) => {
       avatarUrl: u.avatarUrl || "",
       course: u.course || "",
       campus: u.campus || "",
-      accountCreation: u.createdAt,
-      fullName: u.fullName || "",
+      accountCreation: u.accountCreation || u.createdAt,
+      fullName: fullName || "",
       role: u.role || "",
       username: u.username || "",
     });
@@ -42,7 +49,6 @@ function isCounselorRole(role) {
   return /^counselor$/i.test(String(role || ""));
 }
 
-
 function formatYYYYMM(d) {
   const dt = d ? new Date(d) : null;
   if (!dt || !Number.isFinite(dt.getTime())) return "";
@@ -55,21 +61,28 @@ exports.getStudentsForCounselor = async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit || "2000", 10), 1), 5000);
 
-    const students = await User.find({ role: { $regex: /^student$/i } })
+    // tolerate small data inconsistencies like trailing spaces
+    const students = await User.find({ role: { $regex: /^student\s*$/i } })
       .sort({ createdAt: -1 })
       .limit(limit)
-      .select("firstName lastName fullName email studentNumber course accountCreation createdAt")
+      .select("firstName lastName fullName email avatarUrl studentNumber course accountCreation createdAt")
       .lean();
 
     const items = (students || []).map((u) => {
       const created = u.accountCreation || u.createdAt;
+
+      const fromFull = splitName(u.fullName);
+      const firstName = String(u.firstName || fromFull.firstName || "").trim();
+      const lastName = String(u.lastName || fromFull.lastName || "").trim();
+      const fullName = String(u.fullName || [firstName, lastName].filter(Boolean).join(" ")).trim();
+
       return {
         userId: u._id,
-        firstName: u.firstName || "",
-        lastName: u.lastName || "",
-        fullName: u.fullName || "",
+        firstName,
+        lastName,
+        fullName: fullName || "",
         email: u.email || "",
-      avatarUrl: u.avatarUrl || "",
+        avatarUrl: u.avatarUrl || "",
         studentNumber: u.studentNumber || "",
         studentId: u.studentNumber || "",
         course: u.course || "",
@@ -113,7 +126,7 @@ exports.updateStudentForCounselor = async (req, res, next) => {
       throw new Error("Student not found.");
     }
 
-    if (!/^student$/i.test(String(student.role || "Student"))) {
+    if (!/^student\s*$/i.test(String(student.role || "Student"))) {
       res.status(400);
       throw new Error("Target user is not a student.");
     }
@@ -193,7 +206,6 @@ exports.updateStudentForCounselor = async (req, res, next) => {
     next(err);
   }
 };
-
 
 /* =========================
    PROFILE PHOTO (AVATAR)
@@ -313,7 +325,6 @@ exports.updateMyAvatar = async (req, res, next) => {
     next(err);
   }
 };
-
 
 /**
  * Counselor-only avatar upload wrapper
