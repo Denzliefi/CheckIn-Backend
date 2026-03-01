@@ -54,25 +54,22 @@ passwordResetRequestedAt: { type: Date, select: false },
     counselorCode: { type: String, trim: true, maxlength: 32, index: true, sparse: true },
     specialty: [{ type: String, trim: true, maxlength: 80 }],
 
-    role: { type: String, default: "Student" },
+// Student lifecycle status:
+// - pending: newly registered, not yet verified by admin
+// - active: can access services
+// - terminated: can log in but blocked from services
+status: {
+  type: String,
+  trim: true,
+  lowercase: true,
+  enum: ["pending", "active", "terminated"],
+  default: function () {
+    const role = String(this.role || "Student").trim().toLowerCase();
+    return role === "student" ? "pending" : "active";
+  },
+},
 
-    /**
-     * Student lifecycle status:
-     * - pending: not verified
-     * - active: enrolled / full access
-     * - terminated: not enrolled
-     */
-    status: {
-      type: String,
-      enum: ["pending", "active", "terminated"],
-      trim: true,
-      lowercase: true,
-      index: true,
-      default: function () {
-        const role = String(this.role || "Student").trim().toLowerCase();
-        return role === "student" ? "pending" : "active";
-      },
-    },
+role: { type: String, default: "Student" },
 
     accountCreation: { type: Date, default: Date.now },
   },

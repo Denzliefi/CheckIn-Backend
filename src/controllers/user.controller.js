@@ -214,6 +214,8 @@ exports.updateStudentForCounselor = async (req, res, next) => {
   }
 
 
+};
+
 /* =========================
    ADMIN: STUDENT STATUS (LIFECYCLE)
    PATCH /api/users/students/:userId/status
@@ -265,7 +267,7 @@ exports.updateStudentStatusAdmin = async (req, res, next) => {
     return res.json({
       id: String(student._id),
       status: String(student.status || "active").toLowerCase(),
-      updatedAt: student.updatedAt || new Date().toISOString(),
+      updatedAt: (student.updatedAt ? new Date(student.updatedAt).toISOString() : new Date().toISOString()),
     });
   } catch (err) {
     next(err);
@@ -276,7 +278,15 @@ exports.bulkUpdateStudentStatusAdmin = async (req, res, next) => {
   try {
     const adminPassword = String(req.body?.adminPassword || "").trim();
     const nextStatus = String(req.body?.status || "").trim().toLowerCase();
-    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
+    const userIdsRaw = Array.isArray(req.body?.userIds)
+      ? req.body.userIds
+      : Array.isArray(req.body?.studentIds)
+        ? req.body.studentIds
+        : Array.isArray(req.body?.ids)
+          ? req.body.ids
+          : [];
+
+    const userIds = [...new Set(userIdsRaw.map((x) => String(x)).filter(Boolean))];
 
     if (!adminPassword) {
       res.status(400);
@@ -319,8 +329,6 @@ exports.bulkUpdateStudentStatusAdmin = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-};
-
 };
 
 /* =========================

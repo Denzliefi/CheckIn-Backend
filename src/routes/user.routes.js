@@ -13,6 +13,8 @@ const {
   updateMyCounselorAvatar,
   getStudentsForCounselor,
   updateStudentForCounselor,
+  updateStudentStatusAdmin,
+  bulkUpdateStudentStatusAdmin,
   getCounselorsAdmin,
   createCounselorAdmin,
   deleteCounselorAdmin,
@@ -31,6 +33,23 @@ router.post("/me/counselor/avatar", protect, requireRole("Counselor"), avatarUpl
 // Students list/edit (Counselor + Admin)
 router.get("/students", protect, requireRole("Counselor", "Admin"), getStudentsForCounselor);
 router.patch("/students/:userId", protect, requireRole("Counselor", "Admin"), updateStudentForCounselor);
+// Admin: Student lifecycle status (Pending/Active/Terminated)
+router.patch(
+  "/students/:userId/status",
+  protect,
+  requireRole("Admin"),
+  validate(["adminPassword", "status"]),
+  updateStudentStatusAdmin
+);
+
+router.patch(
+  "/students/status/bulk",
+  protect,
+  requireRole("Admin"),
+  validate(["adminPassword", "status"]),
+  bulkUpdateStudentStatusAdmin
+);
+
 
 // Counselor management (Admin)
 router.get("/counselors", protect, requireRole("Admin"), getCounselorsAdmin);
