@@ -50,7 +50,15 @@ passwordResetTokenHash: { type: String, select: false, index: true },
 passwordResetExpires: { type: Date, select: false },
 passwordResetRequestedAt: { type: Date, select: false },
 
-    // Optional counselor profile fields (used when role === "Counselor")
+    
+
+// Password reset OTP (local accounts)
+passwordResetOtpHash: { type: String, select: false },
+passwordResetOtpExpires: { type: Date, select: false },
+passwordResetOtpRequestedAt: { type: Date, select: false },
+passwordResetOtpAttempts: { type: Number, select: false, default: 0 },
+passwordResetOtpVerifiedAt: { type: Date, select: false },
+// Optional counselor profile fields (used when role === "Counselor")
     counselorCode: { type: String, trim: true, maxlength: 32, index: true, sparse: true },
     specialty: [{ type: String, trim: true, maxlength: 80 }],
 

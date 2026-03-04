@@ -21,6 +21,8 @@ const {
   forgotPassword,
   resetPassword,
   validateResetPasswordToken,
+  sendResetPasswordOtp,
+  verifyResetPasswordOtp,
 } = require("../controllers/auth.controller");
 
 /**
@@ -77,6 +79,22 @@ router.post("/reset-password", validate(["token", "password"]), resetPassword);
  */
 router.get("/reset-password/validate", validateResetPasswordToken);
 
+
+
+
+/**
+ * @route   POST /api/auth/reset-password/send-otp
+ * @desc    Send one-time code for reset flow (requires valid reset token)
+ * @access  Public
+ */
+router.post("/reset-password/send-otp", validate(["token"]), sendResetPasswordOtp);
+
+/**
+ * @route   POST /api/auth/reset-password/verify-otp
+ * @desc    Verify one-time code for reset flow
+ * @access  Public
+ */
+router.post("/reset-password/verify-otp", validate(["token", "otp"]), verifyResetPasswordOtp);
 
 /**
  * @route   GET /api/auth/availability

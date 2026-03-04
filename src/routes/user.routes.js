@@ -18,6 +18,7 @@ const {
   getCounselorsAdmin,
   createCounselorAdmin,
   deleteCounselorAdmin,
+  getAdminAnalytics,
 } = require("../controllers/user.controller");
 
 router.get("/me", protect, getMe);
@@ -49,6 +50,10 @@ router.patch(
   validate(["adminPassword", "status"]),
   bulkUpdateStudentStatusAdmin
 );
+
+
+// ✅ Admin analytics (AssignmentsReassignment)
+router.get("/admin/analytics", protect, requireRole("Admin"), getAdminAnalytics);
 
 
 // Counselor management (Admin)

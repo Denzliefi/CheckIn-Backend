@@ -38,6 +38,7 @@ exports.getMe = async (req, res, next) => {
 };
 
 const User = require("../models/User.model");
+const CounselingRequest = require("../models/CounselingRequest");
 const path = require("path");
 const fs = require("fs/promises");
 const crypto = require("crypto");
@@ -691,3 +692,123 @@ exports.updateMyCounselorAvatar = async (req, res, next) => {
     next(err);
   }
 };
+
+
+/* =========================
+   ADMIN: ANALYTICS (AssignmentsReassignment)
+   GET /api/users/admin/analytics
+   - Student lifecycle counts: pending / active / terminated
+   - Active students: status === "active"
+   - Counselors: role === "counselor" (case-insensitive), plus active counselors
+   - Requests status counts from CounselingRequest: pending / approved / cancelled / disapproved
+   - Students by course: count + percentage
+========================= */
+exports.getAdminAnalytics = async (req, res, next) => {
+  try {
+    const studentRole = { role: { $regex: /^student\s*$/i } };
+    const counselorRole = { role: { $regex: /^counselor\s*$/i } };
+
+    const [
+      studentsPending,
+      studentsActive,
+      studentsTerminated,
+      studentsTotal,
+      counselorsTotal,
+      counselorsActive,
+      courseAgg,
+      requestAgg,
+    ] = await Promise.all([
+      User.countDocuments({ ...studentRole, status: "pending" }),
+      User.countDocuments({ ...studentRole, status: "active" }),
+      User.countDocuments({ ...studentRole, status: "terminated" }),
+      User.countDocuments(studentRole),
+      User.countDocuments(counselorRole),
+      User.countDocuments({ ...counselorRole, status: "active" }),
+      User.aggregate([
+        { $match: studentRole },
+        {
+          $project: {
+            course: {
+              $trim: {
+                input: { $ifNull: ["$course", ""] },
+              },
+            },
+          },
+        },
+        {
+          $addFields: {
+            course: {
+              $cond: [{ $eq: ["$course", ""] }, "Unknown", "$course"],
+            },
+          },
+        },
+        { $group: { _id: "$course", count: { $sum: 1 } } },
+        { $sort: { count: -1, _id: 1 } },
+      ]),
+      CounselingRequest.aggregate([
+        {
+          $project: {
+            statusLower: { $toLower: { $ifNull: ["$status", ""] } },
+          },
+        },
+        { $group: { _id: "$statusLower", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const byStatus = new Map((requestAgg || []).map((x) => [String(x._id || ""), Number(x.count || 0)]));
+
+    const requestsPending = byStatus.get("pending") || 0;
+    const requestsApproved = byStatus.get("approved") || 0;
+    const requestsCancelled = byStatus.get("cancelled") || 0;
+    const requestsDisapproved = byStatus.get("disapproved") || 0;
+
+    const requestsTotal = requestsPending + requestsApproved + requestsCancelled + requestsDisapproved;
+
+    const denom = Math.max(1, Number(studentsTotal || 0));
+    const studentsByCourse = (courseAgg || []).map((c) => {
+      const course = String(c._id || "Unknown").trim() || "Unknown";
+      const count = Math.max(0, Number(c.count || 0));
+      const percentage = Math.round((count / denom) * 1000) / 10; // 1 decimal place
+      return { key: course, course, count, percentage };
+    });
+
+    // Return both:
+    // - A "clean" structure for future use
+    // - UI-friendly keys already expected by AssignmentsReassignment.js (no UI changes required)
+    return res.json({
+      students: {
+        pending: studentsPending,
+        active: studentsActive,
+        terminated: studentsTerminated,
+        total: studentsTotal,
+      },
+      activeStudents: studentsActive,
+      counselors: counselorsTotal,
+      counselorsActive,
+
+      requests: {
+        pending: requestsPending,
+        approved: requestsApproved,
+        cancelled: requestsCancelled,
+        disapproved: requestsDisapproved,
+        total: requestsTotal,
+      },
+
+      studentsByCourse,
+
+      // ✅ UI keys (AssignmentsReassignment / AdminOverviewAnalytics)
+      studentsTotal,
+      studentsActive,
+      counselorsTotal,
+      requestsPending,
+      requestsApproved,
+      requestsCancelled,
+      requestsDone: requestsDisapproved, // UI label is "Disapproved"
+      requestsDisapproved,
+      requestsNoShows: 0,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+

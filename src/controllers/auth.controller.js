@@ -6,7 +6,9 @@ const User = require("../models/User.model");
 const {
   requestPasswordReset,
   resetPasswordWithToken,
-  validatePasswordResetToken,
+  sendPasswordResetOtp,
+  verifyPasswordResetOtp,
+  validatePasswordResetTokenInfo
 } = require("../services/auth.service");
 /* =======================
    Helpers (sanitize + normalize)
@@ -547,11 +549,10 @@ async function validateResetPasswordToken(req, res) {
       });
     }
 
-    const ok = await validatePasswordResetToken(token);
+    const info = await validatePasswordResetTokenInfo(token);
 
-    if (ok) return res.json({ valid: true });
-
-    return res.json({
+    if (info && info.valid) return res.json({ valid: true, otpVerified: Boolean(info.otpVerified) });
+return res.json({
       valid: false,
       message: "Expired! Reset link is invalid or has already been used. Please request a new one.",
     });
@@ -561,6 +562,56 @@ async function validateResetPasswordToken(req, res) {
       valid: false,
       message: "Expired! Reset link is invalid or expired. Please request a new one.",
     });
+  }
+}
+
+
+
+/* =======================
+   SEND RESET OTP
+   POST /api/auth/reset-password/send-otp
+   Body: { token }
+======================= */
+async function sendResetPasswordOtp(req, res) {
+  try {
+    const token = String(req.body.token ?? "").trim();
+    if (!token) return res.status(400).json({ message: "Token is required." });
+
+    const result = await sendPasswordResetOtp(token);
+
+    return res.json({
+      message:
+        result && result.sent === false
+          ? "Please wait before requesting another code."
+          : "OTP sent. Please check your email.",
+      cooldownSeconds: result && result.cooldownSeconds ? result.cooldownSeconds : undefined,
+    });
+  } catch (err) {
+    console.error("SEND_RESET_OTP_ERROR:", err);
+    return res.status(400).json({ message: err.message || "Unable to send OTP." });
+  }
+}
+
+/* =======================
+   VERIFY RESET OTP
+   POST /api/auth/reset-password/verify-otp
+   Body: { token, otp }
+======================= */
+async function verifyResetPasswordOtp(req, res) {
+  try {
+    const token = String(req.body.token ?? "").trim();
+    const otp = String(req.body.otp ?? "").trim();
+
+    if (!token || !otp) {
+      return res.status(400).json({ message: "Token and OTP are required." });
+    }
+
+    await verifyPasswordResetOtp({ token, otp });
+
+    return res.json({ message: "OTP verified. You can now set a new password." });
+  } catch (err) {
+    console.error("VERIFY_RESET_OTP_ERROR:", err);
+    return res.status(400).json({ message: err.message || "Invalid OTP." });
   }
 }
 
@@ -575,5 +626,6 @@ module.exports = {
   forgotPassword,
   resetPassword,
   validateResetPasswordToken,
-
+  sendResetPasswordOtp,
+  verifyResetPasswordOtp,
 };

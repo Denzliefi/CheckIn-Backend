@@ -162,7 +162,52 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlMinutes }) {
   return sendMail({ to, subject, text, html });
 }
 
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+
+async function sendPasswordResetOtpEmail({ to, name = "", otp, ttlMinutes = 10 }) {
+  const subject = "Your CheckIn password reset code";
+  const safeName = String(name || "").trim();
+
+  const text =
+    `Hi${safeName ? " " + safeName : ""},\n\n` +
+    `Your one-time code is: ${otp}\n` +
+    `This code expires in ${ttlMinutes} minute(s).\n\n` +
+    `If you did not request this, you can ignore this email.\n`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+      <h2 style="margin: 0 0 12px;">Password Reset Code</h2>
+      <p style="margin: 0 0 12px;">
+        Hi${safeName ? " <b>" + escapeHtml(safeName) + "</b>" : ""},<br/>
+        Use the one-time code below to continue resetting your password:
+      </p>
+      <div style="display:inline-block; padding: 10px 14px; border-radius: 10px; background:#F4FFE7; border:1px solid rgba(0,0,0,.12); font-size: 20px; letter-spacing: 2px; font-weight: 800;">
+        ${otp}
+      </div>
+      <p style="margin: 12px 0 0; font-size: 13px; color: rgba(0,0,0,.65);">
+        This code expires in ${ttlMinutes} minute(s).
+      </p>
+      <p style="margin: 12px 0 0; font-size: 12px; color: rgba(0,0,0,.55);">
+        If you did not request this, you can ignore this email.
+      </p>
+    </div>
+  `;
+
+  return sendMail({ to, subject, text, html });
+}
+
+
 module.exports = {
   sendMail,
   sendPasswordResetEmail,
+  sendPasswordResetOtpEmail,
 };
