@@ -8,7 +8,7 @@ const {
   resetPasswordWithToken,
   sendPasswordResetOtp,
   verifyPasswordResetOtp,
-  validatePasswordResetTokenInfo
+  validatePasswordResetToken
 } = require("../services/auth.service");
 /* =======================
    Helpers (sanitize + normalize)
@@ -549,7 +549,7 @@ async function validateResetPasswordToken(req, res) {
       });
     }
 
-    const info = await validatePasswordResetTokenInfo(token);
+    const info = await validatePasswordResetToken(token);
 
     if (info && info.valid) return res.json({ valid: true, otpVerified: Boolean(info.otpVerified) });
 return res.json({
