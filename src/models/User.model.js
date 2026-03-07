@@ -28,10 +28,17 @@ const UserSchema = new mongoose.Schema(
 
     studentNumber: {
       type: String,
-      required: true,
-      unique: true,
       trim: true,
       maxlength: 32, // allow GOOGLE-xxxx fallback
+      // ✅ Students must have studentNumber; counselors/admin don't.
+      required: function () {
+        const role = String(this.role || "Student").trim().toLowerCase();
+        return role === "student";
+      },
+      // ✅ Allow non-students to omit this field without breaking unique index.
+      // NOTE: if an existing non-sparse unique index exists in MongoDB, you must drop/recreate it.
+      unique: true,
+      sparse: true,
     },
 
     course: { type: String, trim: true, maxlength: 120 },

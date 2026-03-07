@@ -10,7 +10,12 @@ function splitName(fullName = "") {
 
 exports.getMe = async (req, res, next) => {
   try {
-    const u = req.user;
+    const UserModel = require("../models/User.model");
+    const baseUser = req.user;
+    const u = (await UserModel.findById(baseUser?._id || baseUser?.id)
+      .select("firstName lastName fullName studentNumber email avatarUrl course campus accountCreation createdAt role username counselorCode status")
+      .lean()
+      .catch(() => null)) || baseUser;
 
     // Prefer stored fields; fallback to splitting fullName
     const fromFull = splitName(u.fullName);
@@ -21,7 +26,11 @@ exports.getMe = async (req, res, next) => {
     res.json({
       firstName,
       lastName,
-      studentNumber: u.studentNumber || "",
+      // Students only
+      studentNumber: /^student\s*$/i.test(String(u.role || "Student")) ? (u.studentNumber || "") : "",
+      // Counselors
+      counselorCode: u.counselorCode || "",
+      counselorId: u.counselorCode || "",
       email: u.email || "",
       avatarUrl: u.avatarUrl || "",
       course: u.course || "",
@@ -85,7 +94,11 @@ exports.getStudentsForCounselor = async (req, res, next) => {
         fullName: fullName || "",
         email: u.email || "",
         avatarUrl: u.avatarUrl || "",
-        studentNumber: u.studentNumber || "",
+        // Students only
+      studentNumber: /^student\s*$/i.test(String(u.role || "Student")) ? (u.studentNumber || "") : "",
+      // Counselors
+      counselorCode: u.counselorCode || "",
+      counselorId: u.counselorCode || "",
         studentId: u.studentNumber || "",
         course: u.course || "",
         campus: u.campus || "",
@@ -489,13 +502,11 @@ exports.createCounselorAdmin = async (req, res, next) => {
     // Generate required fields for this schema
     const usernameSeed = String(email || "").split("@")[0] || "counselor";
     const username = await cmGenerateUniqueUsername(usernameSeed);
-    const studentNumber = await cmGenerateUniqueStudentNumber(`COUNSELOR-${counselorId}`);
 
     const counselor = await User.create({
       fullName,
       email,
       username,
-      studentNumber,
       password,
       role: "Counselor",
       counselorCode: counselorId,

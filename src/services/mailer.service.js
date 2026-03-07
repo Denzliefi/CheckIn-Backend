@@ -205,9 +205,142 @@ async function sendPasswordResetOtpEmail({ to, name = "", otp, ttlMinutes = 10 }
   return sendMail({ to, subject, text, html });
 }
 
+/**
+ * Meet Request status notifications (Approved / Rescheduled / Disapproved)
+ * Reusable for other email-based notifications.
+ */
+async function sendMeetRequestStatusEmail({
+  to,
+  studentName = "",
+  status,
+  requestId,
+  date,
+  time,
+  sessionType,
+  reason,
+  meetingLink,
+  location,
+  counselorName,
+  counselorCampus,
+  studentCampus,
+  rescheduledFrom,
+  rescheduleNote,
+  disapprovalReason,
+}) {
+  const safeStatus = String(status || "").trim();
+  const statusLower = safeStatus.toLowerCase();
+
+  let subject = "Counseling request update";
+  if (statusLower === "approved") subject = "Your counseling request was approved";
+  else if (statusLower === "rescheduled") subject = "Your counseling session was rescheduled";
+  else if (statusLower === "disapproved") subject = "Your counseling request was disapproved";
+
+  const name = String(studentName || "").trim() || "Student";
+  const counselor = String(counselorName || "").trim() || "Guidance Counselor";
+  const mode = String(sessionType || "").trim() || "—";
+
+  const showLink = String(mode).toLowerCase().includes("online");
+  const showLocation = String(mode).toLowerCase().includes("in-person") || String(mode).toLowerCase().includes("face");
+
+  const line = (label, value) => `${label}: ${value || "—"}`;
+
+  const lines = [
+    `Hi ${name},`,
+    "",
+    statusLower === "approved"
+      ? "Your online meeting request has been approved. Here are the details:"
+      : statusLower === "rescheduled"
+        ? "Your online meeting request has been rescheduled. Here are the updated details:"
+        : statusLower === "disapproved"
+          ? "Your online meeting request has been disapproved."
+          : "Your counseling request has been updated.",
+    "",
+    line("Request ID", requestId ? `#${requestId}` : "—"),
+    line("Schedule", [date, time].filter(Boolean).join(" • ") || "—"),
+    line("Mode", mode),
+  ];
+
+  if (reason) lines.push(line("Reason", reason));
+
+  if (statusLower === "rescheduled" && rescheduledFrom?.date && rescheduledFrom?.time) {
+    const prev = [rescheduledFrom.date, rescheduledFrom.time].filter(Boolean).join(" • ");
+    const prevMode = rescheduledFrom.sessionType ? ` (${rescheduledFrom.sessionType})` : "";
+    lines.push("", line("Previous schedule", `${prev}${prevMode}`));
+  }
+
+  if (rescheduleNote) lines.push(line("Counselor note", rescheduleNote));
+
+  if (showLink) {
+    lines.push(line("Meeting link", meetingLink || "To be provided"));
+  }
+
+  if (showLocation) {
+    lines.push(line("Location", location || "To be provided"));
+  }
+
+  if (statusLower === "disapproved") {
+    lines.push("", line("Counselor reason", disapprovalReason || "—"));
+  }
+
+  if (counselorCampus || studentCampus) {
+    lines.push("", line("Campus", counselorCampus || studentCampus));
+  }
+
+  lines.push("", "Thank you,", counselor, "Guidance & Counseling Office");
+
+  const text = lines.join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.55; color: #111;">
+      <h2 style="margin:0 0 10px;">${escapeHtml(subject)}</h2>
+      <p style="margin:0 0 12px;">Hi <b>${escapeHtml(name)}</b>,</p>
+      <p style="margin:0 0 12px;">
+        ${
+          statusLower === "approved"
+            ? "Your online meeting request has been <b>approved</b>."
+            : statusLower === "rescheduled"
+              ? "Your online meeting request has been <b>rescheduled</b>."
+              : statusLower === "disapproved"
+                ? "Your online meeting request has been <b>disapproved</b>."
+                : "Your counseling request has been updated."
+        }
+      </p>
+
+      <div style="border:1px solid rgba(0,0,0,.12); border-radius:14px; padding:12px 14px; background:#fff;">
+        <p style="margin:0 0 6px;"><b>Request ID:</b> ${requestId ? `#${escapeHtml(requestId)}` : "—"}</p>
+        <p style="margin:0 0 6px;"><b>Schedule:</b> ${escapeHtml([date, time].filter(Boolean).join(" • ") || "—")}</p>
+        <p style="margin:0 0 6px;"><b>Mode:</b> ${escapeHtml(mode)}</p>
+        ${reason ? `<p style="margin:0 0 6px;"><b>Reason:</b> ${escapeHtml(reason)}</p>` : ""}
+        ${
+          statusLower === "rescheduled" && rescheduledFrom?.date && rescheduledFrom?.time
+            ? `<p style="margin:10px 0 6px;"><b>Previous schedule:</b> ${escapeHtml(
+                [rescheduledFrom.date, rescheduledFrom.time].filter(Boolean).join(" • ")
+              )}${rescheduledFrom.sessionType ? ` (${escapeHtml(rescheduledFrom.sessionType)})` : ""}</p>`
+            : ""
+        }
+        ${rescheduleNote ? `<p style="margin:0 0 6px;"><b>Counselor note:</b> ${escapeHtml(rescheduleNote)}</p>` : ""}
+        ${showLink ? `<p style="margin:0 0 6px;"><b>Meeting link:</b> ${meetingLink ? `<a href="${escapeHtml(meetingLink)}">${escapeHtml(meetingLink)}</a>` : "To be provided"}</p>` : ""}
+        ${showLocation ? `<p style="margin:0 0 6px;"><b>Location:</b> ${escapeHtml(location || "To be provided")}</p>` : ""}
+        ${statusLower === "disapproved" ? `<p style="margin:10px 0 0;"><b>Counselor reason:</b> ${escapeHtml(disapprovalReason || "—")}</p>` : ""}
+      </div>
+
+      <p style="margin:12px 0 0;">Thank you,<br/><b>${escapeHtml(counselor)}</b><br/>Guidance &amp; Counseling Office</p>
+    </div>
+  `;
+
+  return sendMail({ to, subject, text, html });
+}
+
+async function sendMeetRequestDetailsUpdatedEmail(payload) {
+  // Semantic wrapper so controller can call a dedicated function.
+  return sendMeetRequestStatusEmail({ ...payload, status: payload?.status || "Updated" });
+}
+
 
 module.exports = {
   sendMail,
   sendPasswordResetEmail,
   sendPasswordResetOtpEmail,
+  sendMeetRequestStatusEmail,
+  sendMeetRequestDetailsUpdatedEmail,
 };

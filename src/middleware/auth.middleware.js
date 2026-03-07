@@ -68,9 +68,19 @@ exports.protect = async (req, res, next) => {
     }
 
     next();
-  } catch (err) {
+} catch (err) {
     console.error("PROTECT ERROR:", err?.message);
-    res.status(res.statusCode && res.statusCode !== 200 ? res.statusCode : 401);
-    next(err);
+
+    const status = res.statusCode && res.statusCode !== 200 ? res.statusCode : 401;
+
+    // If this middleware is ever invoked without a proper next() (rare, but it happens when middleware
+    // is called manually), do NOT throw "next is not a function". Respond directly.
+    if (res.headersSent) return;
+    if (typeof next !== "function") {
+      return res.status(status).json({ message: err?.message || "Not authorized" });
+    }
+
+    res.status(status);
+    return next(err);
   }
 };

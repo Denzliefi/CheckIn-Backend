@@ -22,6 +22,21 @@ router.get("/requests/:id", protect, counseling.getRequest);
 router.patch("/requests/:id/cancel", protect, counseling.cancelRequest);
 
 // Admin/Counselor endpoints
+
+// Availability blocks (Admin manages counselor availability; counselors can request blocks)
+router.get("/blocks/mine", protect, requireRole("Counselor", "Admin"), counseling.listMyAvailabilityBlocks);
+router.post("/blocks/request", protect, requireRole("Counselor"), counseling.requestAvailabilityBlock);
+router.patch("/blocks/:id/cancel-request", protect, requireRole("Counselor"), counseling.requestCancelAvailabilityBlock);
+
+
+router.get("/admin/blocks", protect, requireRole("Admin"), counseling.listAdminAvailabilityBlocks);
+router.post("/admin/blocks", protect, requireRole("Admin"), counseling.createAdminAvailabilityBlock);
+router.delete("/admin/blocks/:id", protect, requireRole("Admin"), counseling.deleteAdminAvailabilityBlock);
+router.patch("/admin/blocks/:id/approve", protect, requireRole("Admin"), counseling.approveAvailabilityBlockRequest);
+router.patch("/admin/blocks/:id/reject", protect, requireRole("Admin"), counseling.rejectAvailabilityBlockRequest);
+router.patch("/admin/blocks/:id/cancel/approve", protect, requireRole("Admin"), counseling.approveCancelAvailabilityBlock);
+router.patch("/admin/blocks/:id/cancel/reject", protect, requireRole("Admin"), counseling.rejectCancelAvailabilityBlock);
+
 router.get("/admin/requests", protect, requireRole("Admin", "Counselor"), counseling.listRequests);
 
 router.patch(

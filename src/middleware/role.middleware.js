@@ -6,16 +6,16 @@ function requireRole(...allowedRoles) {
     const role = String(req.user?.role || "").trim().toLowerCase();
 
     if (!role) {
-      res.status(403);
-      return next(new Error("Access denied: no role assigned"));
+      return res.status(403).json({ message: "Access denied: no role assigned" });
     }
 
     if (!allowed.has(role)) {
-      res.status(403);
-      return next(new Error("Access denied: insufficient role"));
+      return res.status(403).json({ message: "Access denied: insufficient role" });
     }
 
-    return next();
+    if (typeof next === "function") return next();
+    // Extremely defensive fallback
+    return res.status(500).json({ message: "Server error: middleware chain broken." });
   };
 }
 
