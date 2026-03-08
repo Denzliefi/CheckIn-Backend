@@ -6,6 +6,8 @@ const User = require("../models/User.model");
 const AvailabilityBlock = require("../models/AvailabilityBlock.model");
 const mongoose = require("mongoose");
 
+
+const { sendMeetRequestStatusEmail } = require("../services/mailer.service");
 // ---------------- Availability blocks + booking window ----------------
 function getBookingWindowDays() {
   const n = parseInt(process.env.MEET_BOOKING_WINDOW_DAYS || "30", 10);
@@ -52,6 +54,173 @@ function blockReason(block) {
   return "Counselor unavailable";
 }
 
+function getDefaultInPersonLocation() {
+  return "Guidance Counselor's office";
+}
+
+async function findApprovalBlockConflict(doc) {
+  try {
+    if (!doc || String(doc.type || "") !== "MEET") return null;
+    if (String(doc.status || "") !== "Pending") return null;
+    if (!doc.counselorId || !doc.date || !doc.time) return null;
+    const { start: slotStart, end: slotEnd } = slotInterval(String(doc.date).trim(), String(doc.time).trim(), 60);
+    const blocked = await AvailabilityBlock.findOne({
+      counselorId: doc.counselorId,
+      status: "Approved",
+      startAt: { $lt: slotEnd.toJSDate() },
+      endAt: { $gt: slotStart.toJSDate() },
+    }).select("type note startAt endAt").lean();
+    if (!blocked) return null;
+    return { blocked: true, reason: blockReason(blocked), type: String(blocked.type || "Unavailable"), note: String(blocked.note || "").trim(), startAt: blocked.startAt, endAt: blocked.endAt };
+  } catch (err) {
+    console.warn("findApprovalBlockConflict failed:", err?.message || err);
+    return null;
+  }
+}
+
+async function findExistingSessionConflict(doc) {
+  try {
+    if (!doc || String(doc.type || "") !== "MEET") return null;
+    if (!["Approved", "Rescheduled"].includes(String(doc.status || ""))) return null;
+    if (!doc.counselorId || !doc.date || !doc.time) return null;
+    const { start: slotStart, end: slotEnd } = slotInterval(String(doc.date).trim(), String(doc.time).trim(), 60);
+    const blocked = await AvailabilityBlock.findOne({
+      counselorId: doc.counselorId,
+      status: "Approved",
+      startAt: { $lt: slotEnd.toJSDate() },
+      endAt: { $gt: slotStart.toJSDate() },
+    }).select("type note startAt endAt").lean();
+    if (!blocked) return null;
+    return { blocked: true, reason: blockReason(blocked), type: String(blocked.type || "Unavailable"), note: String(blocked.note || "").trim(), startAt: blocked.startAt, endAt: blocked.endAt };
+  } catch (err) {
+    console.warn("findExistingSessionConflict failed:", err?.message || err);
+    return null;
+  }
+}
+
+function toPHDisplayDate(value) {
+  try {
+    return new Date(value).toLocaleDateString("en-US", { timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return String(value || "");
+  }
+}
+
+function toPHDisplayTime(value) {
+  try {
+    return new Date(value).toLocaleTimeString("en-US", { timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit", hour12: true });
+  } catch {
+    return String(value || "");
+  }
+}
+
+async function findConflictingMeetingsForBlock(doc) {
+  if (!doc) return [];
+  const gid = String(doc.groupId || "").trim();
+  const blockDocs = await AvailabilityBlock.find(gid ? { groupId: gid } : { _id: doc._id }).select("counselorId startAt endAt type note").lean();
+  const ranges = (Array.isArray(blockDocs) ? blockDocs : []).filter((b) => b?.startAt && b?.endAt);
+  if (!ranges.length) return [];
+  const counselorId = doc.counselorId || ranges[0]?.counselorId;
+  const requests = await CounselingRequest.find({ type: "MEET", counselorId, status: { $in: ["Approved", "Rescheduled"] } })
+    .populate("userId", "firstName lastName fullName email")
+    .select("_id status date time sessionType reason userId")
+    .lean();
+  const conflicts = [];
+  for (const req of requests) {
+    const start = sessionDateTimePH(String(req.date || "").trim(), String(req.time || "").trim());
+    if (!start.isValid) continue;
+    const end = start.plus({ minutes: 60 });
+    const hit = ranges.find((b) => {
+      const bs = DateTime.fromJSDate(new Date(b.startAt), { zone: PH_TZ });
+      const be = DateTime.fromJSDate(new Date(b.endAt), { zone: PH_TZ });
+      return overlaps(start, end, bs, be);
+    });
+    if (!hit) continue;
+    const student = req.userId && typeof req.userId === 'object' ? req.userId : null;
+    const studentName = String(student?.fullName || [student?.firstName, student?.lastName].filter(Boolean).join(" ") || "Student").trim() || "Student";
+    conflicts.push({ id: String(req._id), status: String(req.status || ""), date: String(req.date || ""), time: String(req.time || ""), sessionType: String(req.sessionType || ""), reason: String(req.reason || ""), studentName, studentEmail: String(student?.email || "").trim(), blockType: String(hit.type || "Unavailable"), blockReason: blockReason(hit) });
+  }
+  conflicts.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  return conflicts;
+}
+
+
+function isCurrentPHMonth(dateISO) {
+  if (!dateISO) return false;
+  const currentMonth = phNow().toFormat("yyyy-MM");
+  return String(dateISO).startsWith(`${currentMonth}-`);
+}
+
+function requireCurrentPHMonth(dateISO) {
+  if (isCurrentPHMonth(dateISO)) return { ok: true };
+  return {
+    ok: false,
+    code: "CURRENT_MONTH_ONLY",
+    message: "Please choose a date within the current month only.",
+  };
+}
+
+function sessionDateTimePH(dateISO, time24) {
+  return DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ });
+}
+
+async function hasStudentWeeklyReschedule({ userId, targetDateISO, excludeId }) {
+  const { weekStart, weekEnd } = getPHWeekRange(targetDateISO);
+  const q = {
+    userId,
+    type: "MEET",
+    date: { $gte: weekStart, $lte: weekEnd },
+    rescheduleInitiator: "Student",
+  };
+  if (excludeId) q._id = { $ne: excludeId };
+  const hit = await CounselingRequest.findOne(q).select("_id date status").lean();
+  return { used: !!hit, weekStart, weekEnd, item: hit || null };
+}
+
+
+async function notifyMeetStatusEmail(doc, statusOverride) {
+  try {
+    if (!doc || String(doc.type || "") !== "MEET") return;
+
+    const studentId = doc.userId && typeof doc.userId === "object" ? doc.userId._id : doc.userId;
+    const counselorId = doc.counselorId && typeof doc.counselorId === "object" ? doc.counselorId._id : doc.counselorId;
+
+    const student = await User.findById(studentId).select("firstName lastName fullName email campus").lean();
+    if (!student?.email) return;
+
+    const counselor = counselorId
+      ? await User.findById(counselorId).select("firstName lastName fullName campus").lean()
+      : null;
+
+    const payload = {
+      to: student.email,
+      studentName:
+        String(student.fullName || "").trim() ||
+        [student.firstName, student.lastName].filter(Boolean).join(" ").trim(),
+      status: statusOverride || doc.status,
+      requestId: String(doc._id),
+      date: doc.date,
+      time: doc.time,
+      sessionType: doc.sessionType,
+      reason: doc.reason,
+      meetingLink: doc.meetingLink,
+      location: doc.location,
+      counselorName:
+        String(counselor?.fullName || "").trim() ||
+        [counselor?.firstName, counselor?.lastName].filter(Boolean).join(" ").trim() ||
+        "Guidance Counselor",
+      counselorCampus: counselor?.campus || "",
+      studentCampus: student?.campus || "",
+      rescheduledFrom: doc.rescheduledFrom || undefined,
+      rescheduleNote: doc.rescheduleNote || undefined,
+      disapprovalReason: doc.disapprovalReason || undefined,
+    };
+
+    await sendMeetRequestStatusEmail(payload);
+  } catch (e) {
+    console.error("meet status email failed:", e?.message || e);
+  }
+}
 
 function normalizeDateInput(dateValue) {
   const raw = String(dateValue || "").trim();
@@ -156,23 +325,41 @@ exports.createMeet = async (req, res) => {
       return res.status(400).json({ code: rule.code, message: rule.message });
     }
 
-    // Booking window (backend source of truth)
-    const maxDays = getBookingWindowDays();
-    const today = phNow().toISODate();
-    const latest = DateTime.fromISO(today, { zone: PH_TZ }).plus({ days: maxDays }).toISODate();
-    if (date < today || date > latest) {
-      return res.status(400).json({ code: "DATE_OUT_OF_RANGE", message: `Please choose a date within the next ${maxDays} days.` });
+    const currentMonthRule = requireCurrentPHMonth(date);
+    if (!currentMonthRule.ok) {
+      return res.status(400).json({ code: currentMonthRule.code, message: currentMonthRule.message });
     }
 
     // =========================
-    // A) One active/pending request at a time
+    // A) One active/pending request at a time (only FUTURE sessions block)
     // =========================
-    // Block if there is any MEET with Pending OR Approved (not completed yet)
+    // A session should stop blocking once its scheduled date/time has passed (Asia/Manila),
+    // even if completedAt was never set.
+    const nowPH = phNow();
+    const todayPH = nowPH.toISODate(); // YYYY-MM-DD
+    const nowHHMM = nowPH.toFormat("HH:mm"); // 24h HH:MM
+
     const active = await CounselingRequest.findOne({
       userId,
       type: "MEET",
       status: { $in: ["Pending", "Approved", "Rescheduled"] },
-      $or: [{ completedAt: { $exists: false } }, { completedAt: null }],
+      $and: [
+        { $or: [{ completedAt: { $exists: false } }, { completedAt: null }] },
+        {
+          $or: [
+            { date: { $gt: todayPH } },
+            {
+              date: todayPH,
+              $or: [
+                { time: { $exists: false } },
+                { time: null },
+                { time: "" },
+                { time: { $gte: nowHHMM } },
+              ],
+            },
+          ],
+        },
+      ],
     })
       .select("_id status date time")
       .lean();
@@ -180,11 +367,11 @@ exports.createMeet = async (req, res) => {
     if (active) {
       return res.status(409).json({
         code: "HAS_ACTIVE_REQUEST",
-        message: "You already have an active request. Please wait until it is approved/disapproved (or completed) before booking again.",
+        message:
+          "You already have an active upcoming request. Please wait until it is processed (or completed) before booking again.",
       });
     }
-
-    // =========================
+// =========================
     // B) One booking per week (Mon–Sun, Asia/Manila) based on the SESSION date
     //
     // Option B:
@@ -371,7 +558,7 @@ exports.listRequests = async (req, res) => {
     // Minimal version: just Completed; you can enhance later.
     if (past) {
       q.type = "MEET";
-      q.status = { $in: ["Completed"] };
+      q.status = { $in: ["Completed", "No Show"] };
     }
 
     let query = CounselingRequest.find(q).sort({ createdAt: -1 });
@@ -384,6 +571,10 @@ if (isPrivileged) {
 }
 
 const items = await query.lean();
+
+    if (isPrivileged && Array.isArray(items) && items.length) {
+      await Promise.all(items.map((item) => attachConflictFlags(item)));
+    }
 
     return res.json({ items: items.map(formatRequestLean) });
   } catch (err) {
@@ -410,6 +601,7 @@ exports.getRequest = async (req, res) => {
       return res.status(403).json({ message: "Forbidden." });
     }
 
+    await attachConflictFlags(doc);
     return res.json(formatRequestLean(doc));
   } catch (err) {
     console.error("getRequest error:", err);
@@ -464,38 +656,142 @@ exports.cancelRequest = async (req, res) => {
     doc.cancelledBy = "Student";
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
-        }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
-      }
+    return res.json(formatRequest(doc));
+} catch (err) {
+    console.error("cancelRequest error:", err);
+    return res.status(500).json({ message: "Server error." });
+  }
+};
+
+
+/**
+ * Student: Reschedule own MEET
+ * PATCH /api/counseling/requests/:id/reschedule
+ */
+exports.rescheduleOwnMeetRequest = async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { date, time, sessionType, notes, meetingLink } = req.body || {};
+
+    if (!date || !time) {
+      return res.status(400).json({ code: "MISSING_FIELDS", message: "date and time are required." });
     }
+
+    const allowedSessionTypes = new Set(["Online", "In-person"]);
+    const nextSessionType = sessionType ? String(sessionType).trim() : "";
+    if (nextSessionType && !allowedSessionTypes.has(nextSessionType)) {
+      return res.status(400).json({ code: "INVALID_SESSION_TYPE", message: "Please select a valid session type." });
+    }
+
+    const rule = validateMeetRules({ date: String(date).trim(), time: String(time).trim() });
+    if (!rule.ok) {
+      return res.status(400).json({ code: rule.code, message: rule.message });
+    }
+
+    const currentMonthRule = requireCurrentPHMonth(String(date).trim());
+    if (!currentMonthRule.ok) {
+      return res.status(400).json({ code: currentMonthRule.code, message: currentMonthRule.message });
+    }
+
+    const doc = await CounselingRequest.findById(id);
+    if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
+    if (String(doc.userId) !== String(req.user?.id)) {
+      return res.status(403).json({ message: "Forbidden." });
+    }
+    if (doc.type !== "MEET") {
+      return res.status(400).json({ code: "INVALID_TYPE", message: "Only MEET requests can be rescheduled." });
+    }
+
+    const status = String(doc.status || "");
+    if (!["Pending", "Approved", "Rescheduled"].includes(status)) {
+      return res.status(400).json({ code: "INVALID_STATUS", message: "This request cannot be rescheduled." });
+    }
+
+    const slotDt = sessionDateTimePH(String(doc.date || "").trim(), String(doc.time || "").trim());
+    if (!slotDt.isValid || slotDt < phNow()) {
+      return res.status(400).json({ code: "SESSION_PASSED", message: "This request can no longer be rescheduled." });
+    }
+
+    const weeklyUse = await hasStudentWeeklyReschedule({
+      userId: doc.userId,
+      targetDateISO: String(date).trim(),
+      excludeId: doc._id,
+    });
+    if (weeklyUse.used || doc.rescheduleInitiator === "Student") {
+      return res.status(409).json({
+        code: "WEEKLY_RESCHEDULE_LIMIT",
+        message: "You already used your one reschedule for this week.",
+        meta: { weekStart: weeklyUse.weekStart, weekEnd: weeklyUse.weekEnd },
+      });
+    }
+
+    const nextDate = String(date).trim();
+    const nextTime = String(time).trim();
+    const effectiveSessionType = nextSessionType || String(doc.sessionType || "").trim();
+
+    const { start: slotStart, end: slotEnd } = slotInterval(nextDate, nextTime, 60);
+    const blocked = await AvailabilityBlock.findOne({
+      counselorId: doc.counselorId,
+      status: "Approved",
+      startAt: { $lt: slotEnd.toJSDate() },
+      endAt: { $gt: slotStart.toJSDate() },
+    }).select("type note").lean();
+
+    if (blocked) {
+      return res.status(409).json({
+        code: "COUNSELOR_UNAVAILABLE",
+        message: "Counselor is unavailable for the selected date/time.",
+        meta: { reason: blockReason(blocked), type: String(blocked.type || "Unavailable") },
+      });
+    }
+
+    const conflict = await CounselingRequest.findOne({
+      _id: { $ne: doc._id },
+      type: "MEET",
+      counselorId: doc.counselorId,
+      date: nextDate,
+      time: nextTime,
+      status: { $in: ["Pending", "Approved", "Rescheduled"] },
+    }).select("_id").lean();
+
+    if (conflict) {
+      return res.status(409).json({ code: "SLOT_TAKEN", message: "Time slot already booked." });
+    }
+
+    doc.rescheduledFrom = {
+      date: doc.date,
+      time: doc.time,
+      sessionType: doc.sessionType,
+    };
+    doc.rescheduledAt = new Date();
+    doc.rescheduledBy = req.user?.id;
+    doc.rescheduleInitiator = "Student";
+    doc.rescheduleNote = "Reschedule requested by student.";
+
+    doc.date = nextDate;
+    doc.time = nextTime;
+    if (nextSessionType) doc.sessionType = nextSessionType;
+    if (typeof notes === "string") doc.notes = notes.trim();
+
+    if (effectiveSessionType === "Online") {
+      if (meetingLink != null && String(meetingLink).trim()) doc.meetingLink = String(meetingLink).trim();
+      doc.location = "";
+    } else if (effectiveSessionType === "In-person") {
+      doc.location = getDefaultInPersonLocation();
+      doc.meetingLink = "";
+    }
+
+    // Student-initiated reschedules must go back to Pending so the counselor can review them.
+    // The request only becomes Rescheduled after counselor/admin approval.
+    doc.status = "Pending";
+    await doc.save();
 
     return res.json(formatRequest(doc));
   } catch (err) {
-    console.error("cancelRequest error:", err);
+    console.error("rescheduleOwnMeetRequest error:", err);
+    if (err && (err.code === 11000 || err.name === "MongoServerError")) {
+      return res.status(409).json({ code: "SLOT_TAKEN", message: "Time slot already booked." });
+    }
     return res.status(500).json({ message: "Server error." });
   }
 };
@@ -512,51 +808,64 @@ exports.approveRequest = async (req, res) => {
     const doc = await CounselingRequest.findById(id);
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
 
-    if (doc.status !== "Pending") {
+    const isStudentRescheduleAwaitingApproval =
+      String(doc.status || "") === "Rescheduled" && String(doc.rescheduleInitiator || "") === "Student";
+
+    if (doc.status !== "Pending" && !isStudentRescheduleAwaitingApproval) {
       return res.status(400).json({ code: "INVALID_STATUS", message: "Only pending requests can be approved." });
     }
 
-    // If MEET, allow attaching meetingLink/location
     if (doc.type === "MEET") {
-      if (doc.sessionType === "Online" && meetingLink) doc.meetingLink = String(meetingLink).trim();
-      if (doc.sessionType === "In-person" && location) doc.location = String(location).trim();
-    }
+      const { start: slotStart, end: slotEnd } = slotInterval(String(doc.date || "").trim(), String(doc.time || "").trim(), 60);
+      const blocked = await AvailabilityBlock.findOne({
+        counselorId: doc.counselorId,
+        status: "Approved",
+        startAt: { $lt: slotEnd.toJSDate() },
+        endAt: { $gt: slotStart.toJSDate() },
+      }).select("type note").lean();
 
-    doc.status = "Approved";
-    doc.approvedBy = req.user?.id;
-    await doc.save();
+      if (blocked) {
+        return res.status(409).json({
+          code: "COUNSELOR_UNAVAILABLE",
+          message: "Counselor is unavailable for the selected date/time.",
+          meta: { reason: blockReason(blocked), type: String(blocked.type || "Unavailable") },
+        });
+      }
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
+      if (doc.sessionType === "Online") {
+        const link = String(meetingLink || doc.meetingLink || "").trim();
+        if (!link) {
+          return res.status(400).json({
+            code: "MISSING_MEETING_LINK",
+            message: "Meeting link is required for online counseling.",
+          });
         }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
+        doc.meetingLink = link;
+        doc.location = "";
+      }
+
+      if (doc.sessionType === "In-person") {
+        doc.location = String(location || doc.location || getDefaultInPersonLocation()).trim();
+        doc.meetingLink = "";
       }
     }
 
-    return res.json(formatRequest(doc));
-  } catch (err) {
+    const wasStudentRescheduleRequest =
+      doc.type === "MEET" &&
+      String(doc.rescheduleInitiator || "") === "Student" &&
+      !!doc.rescheduledAt &&
+      !!doc.rescheduledFrom;
+
+    doc.status = wasStudentRescheduleRequest ? "Rescheduled" : "Approved";
+    doc.approvedBy = req.user?.id;
+    await doc.save();
+
+    
+
+    // Notify student via email
+    notifyMeetStatusEmail(doc, wasStudentRescheduleRequest ? "Rescheduled" : "Approved");
+return res.json(formatRequest(doc));
+} catch (err) {
     console.error("approveRequest error:", err);
     return res.status(500).json({ message: "Server error." });
   }
@@ -582,7 +891,11 @@ exports.disapproveRequest = async (req, res) => {
     doc.disapprovalReason = reason ? String(reason).trim() : "Disapproved.";
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
+    
+
+    // Notify student via email
+    notifyMeetStatusEmail(doc, "Disapproved");
+// Optional: if disapproval is due to counselor unavailability, you can block the slot/day
     // so students cannot repeatedly book the same unavailable schedule.
     if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
       try {
@@ -627,7 +940,7 @@ exports.disapproveRequest = async (req, res) => {
 exports.rescheduleMeetRequest = async (req, res) => {
   try {
     const id = req.params.id;
-    const { date, time, sessionType, note } = req.body || {};
+    const { date, time, sessionType, note, meetingLink, location } = req.body || {};
 
     if (!date || !time) {
       return res.status(400).json({ code: "MISSING_FIELDS", message: "date and time are required." });
@@ -665,6 +978,32 @@ exports.rescheduleMeetRequest = async (req, res) => {
 
     const counselorId = doc.counselorId;
 
+    // Disallow rescheduling into an approved leave/unavailability block
+    try {
+      const nextDate = String(date).trim();
+      const nextTime = String(time).trim();
+      const { start: slotStart, end: slotEnd } = slotInterval(nextDate, nextTime, 60);
+
+      const blocked = await AvailabilityBlock.findOne({
+        counselorId,
+        status: "Approved",
+        startAt: { $lt: slotEnd.toJSDate() },
+        endAt: { $gt: slotStart.toJSDate() },
+      })
+        .select("type note startAt endAt")
+        .lean();
+
+      if (blocked) {
+        return res.status(409).json({
+          code: "COUNSELOR_UNAVAILABLE",
+          message: "Counselor is unavailable for the selected date/time.",
+          meta: { reason: blockReason(blocked), type: String(blocked.type || "Unavailable") },
+        });
+      }
+    } catch (e) {
+      console.warn("reschedule block check failed:", e?.message || e);
+    }
+
     // Slot conflict check (Pending/Approved/Rescheduled)
     const conflict = await CounselingRequest.findOne({
       _id: { $ne: doc._id },
@@ -687,19 +1026,31 @@ exports.rescheduleMeetRequest = async (req, res) => {
       time: doc.time,
       sessionType: doc.sessionType,
     };
+    const noteText = String(note || "").trim();
+    if (!noteText) {
+      return res.status(400).json({ code: "MISSING_REASON", message: "Counselor reason is required when rescheduling." });
+    }
+
     doc.rescheduledAt = new Date();
     doc.rescheduledBy = req.user?.id;
-    doc.rescheduleNote = note ? String(note).trim() : doc.rescheduleNote;
+    doc.rescheduleInitiator = role === "Admin" ? "Admin" : "Counselor";
+    doc.rescheduleNote = noteText;
 
     // Apply new schedule
     doc.date = String(date).trim();
     doc.time = String(time).trim();
     if (nextSessionType) doc.sessionType = nextSessionType;
 
-    // If session type changed, keep fields consistent
+    // Keep online/in-person meeting details consistent
     if (doc.sessionType === "Online") {
+      const link = String(meetingLink || doc.meetingLink || "").trim();
+      if (!link) {
+        return res.status(400).json({ code: "MISSING_MEETING_LINK", message: "Meeting link is required for online counseling." });
+      }
+      doc.meetingLink = link;
       doc.location = "";
     } else if (doc.sessionType === "In-person") {
+      doc.location = String(location || doc.location || getDefaultInPersonLocation()).trim();
       doc.meetingLink = "";
     }
 
@@ -707,37 +1058,12 @@ exports.rescheduleMeetRequest = async (req, res) => {
 
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
-        }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
-      }
-    }
+    
 
-    return res.json(formatRequest(doc));
-  } catch (err) {
+    // Notify student via email
+    notifyMeetStatusEmail(doc, "Rescheduled");
+return res.json(formatRequest(doc));
+} catch (err) {
     console.error("rescheduleMeetRequest error:", err);
     // Handle duplicate key from unique index (double booking race)
     if (err && (err.code === 11000 || err.name === "MongoServerError")) {
@@ -764,8 +1090,8 @@ exports.setMeetingDetails = async (req, res) => {
       return res.status(400).json({ code: "INVALID_TYPE", message: "Only MEET requests can be updated." });
     }
 
-    if (!["Approved", "Rescheduled"].includes(String(doc.status || ""))) {
-      return res.status(400).json({ code: "INVALID_STATUS", message: "Meeting details can only be set for approved/rescheduled sessions." });
+    if (!["Pending", "Approved", "Rescheduled"].includes(String(doc.status || ""))) {
+      return res.status(400).json({ code: "INVALID_STATUS", message: "Meeting details can only be set for pending/approved/rescheduled sessions." });
     }
 
     // Extra safety: counselors can only update requests assigned to them (admins can do all)
@@ -780,44 +1106,15 @@ exports.setMeetingDetails = async (req, res) => {
       doc.meetingLink = link;
       doc.location = "";
     } else if (doc.sessionType === "In-person") {
-      const loc = location != null ? String(location).trim() : "";
-      doc.location = loc;
+      const loc = location != null ? String(location).trim() : String(doc.location || getDefaultInPersonLocation()).trim();
+      doc.location = loc || getDefaultInPersonLocation();
       doc.meetingLink = "";
     }
 
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
-        }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
-      }
-    }
-
     return res.json(formatRequest(doc));
-  } catch (err) {
+} catch (err) {
     console.error("setMeetingDetails error:", err);
     return res.status(500).json({ message: "Server error." });
   }
@@ -841,38 +1138,35 @@ exports.completeRequest = async (req, res) => {
     doc.completedAt = new Date();
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
-        }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
-      }
+    return res.json(formatRequest(doc));
+} catch (err) {
+    console.error("completeRequest error:", err);
+    return res.status(500).json({ message: "Server error." });
+  }
+};
+
+/**
+ * Admin/Counselor: Mark MEET as No Show
+ * PATCH /api/counseling/admin/requests/:id/no-show
+ */
+exports.noShowRequest = async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const doc = await CounselingRequest.findById(id);
+    if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Request not found." });
+
+    if (doc.type !== "MEET") {
+      return res.status(400).json({ code: "INVALID_TYPE", message: "Only MEET requests can be marked as no-show." });
     }
+
+    doc.status = "No Show";
+    doc.noShowAt = new Date();
+    await doc.save();
 
     return res.json(formatRequest(doc));
   } catch (err) {
-    console.error("completeRequest error:", err);
+    console.error("noShowRequest error:", err);
     return res.status(500).json({ message: "Server error." });
   }
 };
@@ -905,37 +1199,8 @@ exports.replyToAsk = async (req, res) => {
 
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
-        }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
-      }
-    }
-
     return res.json(formatRequest(doc));
-  } catch (err) {
+} catch (err) {
     console.error("replyToAsk error:", err);
     return res.status(500).json({ message: "Server error." });
   }
@@ -1001,37 +1266,8 @@ exports.setAskThreadStatus = async (req, res) => {
 
     await doc.save();
 
-    // Optional: if disapproval is due to counselor unavailability, you can block the slot/day
-    // so students cannot repeatedly book the same unavailable schedule.
-    if (doc.type === "MEET" && doc.counselorId && (blockDay || blockSlot)) {
-      try {
-        const dateISO = String(doc.date || "").trim();
-        const time24 = String(doc.time || "").trim();
-        const allDay = !!blockDay;
-        const startTime = allDay ? "00:00" : time24;
-        const endTime = allDay ? "00:00" : DateTime.fromISO(`${dateISO}T${time24}`, { zone: PH_TZ }).plus({ minutes: 60 }).toFormat("HH:mm");
-        const built = buildBlockFromBody(
-          {
-            counselorId: doc.counselorId,
-            date: dateISO,
-            allDay,
-            startTime,
-            endTime,
-            type: blockType || "Unavailable",
-            note: reason ? String(reason).trim() : "",
-          },
-          { id: req.user?.id, role: String(req.user?.role || ""), status: "Approved", approvedBy: req.user?.id, approvedAt: new Date() }
-        );
-        if (built.ok) {
-          await AvailabilityBlock.create(built.doc);
-        }
-      } catch (e) {
-        console.warn("auto-block on disapprove failed:", e?.message || e);
-      }
-    }
-
     return res.json(formatRequest(doc));
-  } catch (err) {
+} catch (err) {
     console.error("setAskThreadStatus error:", err);
     return res.status(500).json({ message: "Server error." });
   }
@@ -1099,12 +1335,9 @@ exports.getAvailability = async (req, res) => {
       return res.status(400).json({ code: "INVALID_DATE", message: "Holiday is not allowed." });
     }
 
-    // Booking window (backend source of truth)
-    const maxDays = getBookingWindowDays();
-    const today = phNow().toISODate();
-    const latest = DateTime.fromISO(today, { zone: PH_TZ }).plus({ days: maxDays }).toISODate();
-    if (date < today || date > latest) {
-      return res.status(400).json({ code: "DATE_OUT_OF_RANGE", message: `Please choose a date within the next ${maxDays} days.` });
+    const currentMonthRule = requireCurrentPHMonth(date);
+    if (!currentMonthRule.ok) {
+      return res.status(400).json({ code: currentMonthRule.code, message: currentMonthRule.message });
     }
 
     // Work hours (backend source of truth)
@@ -1344,6 +1577,23 @@ function generateSlots(startHHMM, endHHMM, stepMin) {
 
 
 // ---------- helpers ----------
+async function attachConflictFlags(item) {
+  if (!item) return item;
+  const approvalConflict = await findApprovalBlockConflict(item);
+  if (approvalConflict?.blocked) {
+    item.approvalBlocked = true;
+    item.approvalBlockReason = approvalConflict.reason;
+    item.approvalBlockType = approvalConflict.type;
+  }
+  const scheduleConflict = await findExistingSessionConflict(item);
+  if (scheduleConflict?.blocked) {
+    item.scheduleConflict = true;
+    item.scheduleConflictReason = scheduleConflict.reason;
+    item.scheduleConflictType = scheduleConflict.type;
+  }
+  return item;
+}
+
 function formatRequest(doc) {
   const o = doc.toObject ? doc.toObject() : doc;
   return formatRequestLean(o);
@@ -1377,12 +1627,20 @@ function formatRequestLean(o) {
     rescheduledBy: o.rescheduledBy,
     rescheduledFrom: o.rescheduledFrom,
     rescheduleNote: o.rescheduleNote,
+    rescheduleInitiator: o.rescheduleInitiator,
 
     approvedBy: o.approvedBy,
     disapprovalReason: o.disapprovalReason,
     meetingLink: o.meetingLink,
     location: o.location,
     completedAt: o.completedAt,
+    noShowAt: o.noShowAt,
+    approvalBlocked: !!o.approvalBlocked,
+    approvalBlockReason: o.approvalBlockReason || "",
+    approvalBlockType: o.approvalBlockType || "",
+    scheduleConflict: !!o.scheduleConflict,
+    scheduleConflictReason: o.scheduleConflictReason || "",
+    scheduleConflictType: o.scheduleConflictType || "",
   };
 }
 
@@ -1775,6 +2033,44 @@ exports.deleteAdminAvailabilityBlock = async (req, res) => {
 };
 
 /**
+ * Admin: Preview conflicts before approving a counselor-requested block
+ * GET /api/counseling/admin/blocks/:id/approve-preview
+ */
+exports.previewAvailabilityBlockApproval = async (req, res) => {
+  try {
+    const id = toObjectIdOrEmpty(req.params.id);
+    if (!id) return res.status(400).json({ code: "INVALID_ID", message: "Invalid id." });
+
+    const doc = await AvailabilityBlock.findById(id).lean();
+    if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Block not found." });
+
+    const conflicts = await findConflictingMeetingsForBlock(doc);
+    return res.json({
+      ok: true,
+      hasConflicts: conflicts.length > 0,
+      block: {
+        id: String(doc._id),
+        type: String(doc.type || "Unavailable"),
+        status: String(doc.status || "Pending"),
+        counselorId: String(doc.counselorId || ""),
+        startAt: doc.startAt,
+        endAt: doc.endAt,
+        groupId: String(doc.groupId || ""),
+      },
+      summary: {
+        count: conflicts.length,
+        leaveDate: toPHDisplayDate(doc.startAt),
+        leaveTimeRange: `${toPHDisplayTime(doc.startAt)} – ${toPHDisplayTime(doc.endAt)}`,
+      },
+      conflicts,
+    });
+  } catch (err) {
+    console.error("previewAvailabilityBlockApproval error:", err);
+    return res.status(500).json({ message: "Server error." });
+  }
+};
+
+/**
  * Admin: Approve a counselor-requested block (approves whole group if applicable)
  * PATCH /api/counseling/admin/blocks/:id/approve
  */
@@ -1785,6 +2081,22 @@ exports.approveAvailabilityBlockRequest = async (req, res) => {
 
     const doc = await AvailabilityBlock.findById(id);
     if (!doc) return res.status(404).json({ code: "NOT_FOUND", message: "Block not found." });
+
+    const force = String(req.body?.force || req.query?.force || "").toLowerCase() === "true" || req.body?.force === true;
+    const conflicts = await findConflictingMeetingsForBlock(doc.toObject ? doc.toObject() : doc);
+    if (conflicts.length && !force) {
+      return res.status(409).json({
+        code: "LEAVE_CONFLICTS_EXIST",
+        message: "This leave overlaps existing approved or rescheduled appointments.",
+        meta: {
+          requiresConfirmation: true,
+          count: conflicts.length,
+          leaveDate: toPHDisplayDate(doc.startAt),
+          leaveTimeRange: `${toPHDisplayTime(doc.startAt)} – ${toPHDisplayTime(doc.endAt)}`,
+          conflicts,
+        },
+      });
+    }
 
     const gid = String(doc?.groupId || "").trim();
     const q = gid ? { groupId: gid } : { _id: doc._id };
@@ -1801,7 +2113,7 @@ exports.approveAvailabilityBlockRequest = async (req, res) => {
     });
 
     const fresh = await AvailabilityBlock.findById(doc._id).lean();
-    return res.json(fresh);
+    return res.json({ ...fresh, conflictCount: conflicts.length });
   } catch (err) {
     console.error("approveAvailabilityBlockRequest error:", err);
     return res.status(500).json({ message: "Server error." });

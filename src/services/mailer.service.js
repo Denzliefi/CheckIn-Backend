@@ -239,21 +239,26 @@ async function sendMeetRequestStatusEmail({
   const counselor = String(counselorName || "").trim() || "Guidance Counselor";
   const mode = String(sessionType || "").trim() || "—";
 
-  const showLink = String(mode).toLowerCase().includes("online");
-  const showLocation = String(mode).toLowerCase().includes("in-person") || String(mode).toLowerCase().includes("face");
+  const isOnline = String(mode).toLowerCase().includes("online");
+  const isInPerson = String(mode).toLowerCase().includes("in-person") || String(mode).toLowerCase().includes("face");
+  const requestLabel = isOnline ? "online meeting request" : isInPerson ? "in-person meeting request" : "counseling request";
+  const resolvedMeetingLink = String(meetingLink || "").trim();
+  const resolvedLocation = isInPerson ? String(location || "Guidance Counselor's office").trim() || "Guidance Counselor's office" : String(location || "").trim();
+  const statusSentence =
+    statusLower === "approved"
+      ? `Your ${requestLabel} has been approved. Here are the details:`
+      : statusLower === "rescheduled"
+        ? `Your ${requestLabel} has been rescheduled. Here are the updated details:`
+        : statusLower === "disapproved"
+          ? `Your ${requestLabel} has been disapproved.`
+          : "Your counseling request has been updated.";
 
   const line = (label, value) => `${label}: ${value || "—"}`;
 
   const lines = [
     `Hi ${name},`,
     "",
-    statusLower === "approved"
-      ? "Your online meeting request has been approved. Here are the details:"
-      : statusLower === "rescheduled"
-        ? "Your online meeting request has been rescheduled. Here are the updated details:"
-        : statusLower === "disapproved"
-          ? "Your online meeting request has been disapproved."
-          : "Your counseling request has been updated.",
+    statusSentence,
     "",
     line("Request ID", requestId ? `#${requestId}` : "—"),
     line("Schedule", [date, time].filter(Boolean).join(" • ") || "—"),
@@ -268,14 +273,14 @@ async function sendMeetRequestStatusEmail({
     lines.push("", line("Previous schedule", `${prev}${prevMode}`));
   }
 
-  if (rescheduleNote) lines.push(line("Counselor note", rescheduleNote));
+  if (rescheduleNote) lines.push(line("Counselor reason", rescheduleNote));
 
-  if (showLink) {
-    lines.push(line("Meeting link", meetingLink || "To be provided"));
+  if (isOnline) {
+    lines.push(line("Meeting link", resolvedMeetingLink || "To be provided"));
   }
 
-  if (showLocation) {
-    lines.push(line("Location", location || "To be provided"));
+  if (isInPerson) {
+    lines.push(line("Location", resolvedLocation));
   }
 
   if (statusLower === "disapproved") {
@@ -297,11 +302,11 @@ async function sendMeetRequestStatusEmail({
       <p style="margin:0 0 12px;">
         ${
           statusLower === "approved"
-            ? "Your online meeting request has been <b>approved</b>."
+            ? `Your ${escapeHtml(requestLabel)} has been <b>approved</b>.`
             : statusLower === "rescheduled"
-              ? "Your online meeting request has been <b>rescheduled</b>."
+              ? `Your ${escapeHtml(requestLabel)} has been <b>rescheduled</b>.`
               : statusLower === "disapproved"
-                ? "Your online meeting request has been <b>disapproved</b>."
+                ? `Your ${escapeHtml(requestLabel)} has been <b>disapproved</b>.`
                 : "Your counseling request has been updated."
         }
       </p>
@@ -318,9 +323,9 @@ async function sendMeetRequestStatusEmail({
               )}${rescheduledFrom.sessionType ? ` (${escapeHtml(rescheduledFrom.sessionType)})` : ""}</p>`
             : ""
         }
-        ${rescheduleNote ? `<p style="margin:0 0 6px;"><b>Counselor note:</b> ${escapeHtml(rescheduleNote)}</p>` : ""}
-        ${showLink ? `<p style="margin:0 0 6px;"><b>Meeting link:</b> ${meetingLink ? `<a href="${escapeHtml(meetingLink)}">${escapeHtml(meetingLink)}</a>` : "To be provided"}</p>` : ""}
-        ${showLocation ? `<p style="margin:0 0 6px;"><b>Location:</b> ${escapeHtml(location || "To be provided")}</p>` : ""}
+        ${rescheduleNote ? `<p style="margin:0 0 6px;"><b>Counselor reason:</b> ${escapeHtml(rescheduleNote)}</p>` : ""}
+        ${isOnline ? `<p style="margin:0 0 6px;"><b>Meeting link:</b> ${resolvedMeetingLink ? `<a href="${escapeHtml(resolvedMeetingLink)}">${escapeHtml(resolvedMeetingLink)}</a>` : "To be provided"}</p>` : ""}
+        ${isInPerson ? `<p style="margin:0 0 6px;"><b>Location:</b> ${escapeHtml(resolvedLocation)}</p>` : ""}
         ${statusLower === "disapproved" ? `<p style="margin:10px 0 0;"><b>Counselor reason:</b> ${escapeHtml(disapprovalReason || "—")}</p>` : ""}
       </div>
 

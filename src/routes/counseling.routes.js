@@ -20,6 +20,7 @@ router.get("/availability", protect, counseling.getAvailability);
 router.get("/requests", protect, counseling.listRequests);
 router.get("/requests/:id", protect, counseling.getRequest);
 router.patch("/requests/:id/cancel", protect, counseling.cancelRequest);
+router.patch("/requests/:id/reschedule", protect, counseling.rescheduleOwnMeetRequest);
 
 // Admin/Counselor endpoints
 
@@ -32,6 +33,7 @@ router.patch("/blocks/:id/cancel-request", protect, requireRole("Counselor"), co
 router.get("/admin/blocks", protect, requireRole("Admin"), counseling.listAdminAvailabilityBlocks);
 router.post("/admin/blocks", protect, requireRole("Admin"), counseling.createAdminAvailabilityBlock);
 router.delete("/admin/blocks/:id", protect, requireRole("Admin"), counseling.deleteAdminAvailabilityBlock);
+router.get("/admin/blocks/:id/approve-preview", protect, requireRole("Admin"), counseling.previewAvailabilityBlockApproval);
 router.patch("/admin/blocks/:id/approve", protect, requireRole("Admin"), counseling.approveAvailabilityBlockRequest);
 router.patch("/admin/blocks/:id/reject", protect, requireRole("Admin"), counseling.rejectAvailabilityBlockRequest);
 router.patch("/admin/blocks/:id/cancel/approve", protect, requireRole("Admin"), counseling.approveCancelAvailabilityBlock);
@@ -63,6 +65,7 @@ router.patch(
   counseling.setMeetingDetails
 );
 router.patch("/admin/requests/:id/complete", protect, requireRole("Admin", "Counselor"), counseling.completeRequest);
+router.patch("/admin/requests/:id/no-show", protect, requireRole("Admin", "Counselor"), counseling.noShowRequest);
 router.patch("/admin/requests/:id/reply", protect, requireRole("Admin", "Counselor"), counseling.replyToAsk);
 
 module.exports = router;

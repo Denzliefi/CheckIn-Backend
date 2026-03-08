@@ -10,7 +10,7 @@ const CounselingRequestSchema = new mongoose.Schema(
     // ✅ EXISTING request workflow status (DO NOT TOUCH)
     status: {
       type: String,
-      enum: ["Pending", "Approved", "Rescheduled", "Disapproved", "Cancelled", "Completed"],
+      enum: ["Pending", "Approved", "Rescheduled", "Disapproved", "Cancelled", "Completed", "No Show"],
       default: "Pending",
       index: true,
     },
@@ -74,6 +74,7 @@ rescheduledFrom: {
   sessionType: { type: String, enum: ["Online", "In-person"] },
 },
 rescheduleNote: { type: String, trim: true },
+    rescheduleInitiator: { type: String, enum: ["Student", "Counselor", "Admin"] },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     disapprovalReason: { type: String, trim: true },
 
@@ -81,6 +82,7 @@ rescheduleNote: { type: String, trim: true },
     location: { type: String, trim: true },
 
     completedAt: { type: Date },
+    noShowAt: { type: Date },
   },
   { timestamps: true }
 );
