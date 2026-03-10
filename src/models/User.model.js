@@ -65,6 +65,15 @@ passwordResetOtpExpires: { type: Date, select: false },
 passwordResetOtpRequestedAt: { type: Date, select: false },
 passwordResetOtpAttempts: { type: Number, select: false, default: 0 },
 passwordResetOtpVerifiedAt: { type: Date, select: false },
+
+// Login OTP (manual + Google)
+loginOtpHash: { type: String, select: false },
+loginOtpExpires: { type: Date, select: false },
+loginOtpRequestedAt: { type: Date, select: false },
+loginOtpAttempts: { type: Number, select: false, default: 0 },
+loginOtpPendingId: { type: String, select: false, index: true },
+loginOtpMethod: { type: String, select: false, trim: true, maxlength: 24 },
+
 // Optional counselor profile fields (used when role === "Counselor")
     counselorCode: { type: String, trim: true, maxlength: 32, index: true, sparse: true },
     specialty: [{ type: String, trim: true, maxlength: 80 }],

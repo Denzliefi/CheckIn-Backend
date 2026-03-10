@@ -42,10 +42,11 @@ exports.protect = async (req, res, next) => {
     req.user = user; // now req.user.id, req.user.role exist
 
     // ✅ Student lifecycle gate:
-    // - pending/terminated students can stay logged in, but cannot access protected APIs
+    // - pending/disabled students can stay logged in, but cannot access protected APIs
     //   (except GET /api/users/me which is used to show account status on the client).
     const role = String(user.role || "").trim().toLowerCase();
-    const status = String(user.status || "active").trim().toLowerCase();
+    const rawStatus = String(user.status || "active").trim().toLowerCase();
+    const status = rawStatus === "terminated" ? "disabled" : rawStatus;
 
     if (role === "student" && status !== "active") {
       const isMe =
@@ -57,10 +58,11 @@ exports.protect = async (req, res, next) => {
         const message =
           status === "pending"
             ? "account is pending please contact the guidance office for further clarifications"
-            : "account is terminated please contact the guidance office for further clarifications";
+            : "account is disabled please contact the guidance office for further clarifications";
 
         return res.status(403).json({
           code: status === "pending" ? "ACCOUNT_PENDING" : "ACCOUNT_TERMINATED",
+          normalizedCode: status === "pending" ? "ACCOUNT_PENDING" : "ACCOUNT_DISABLED",
           status,
           message,
         });

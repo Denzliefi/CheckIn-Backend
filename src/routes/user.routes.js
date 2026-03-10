@@ -34,7 +34,7 @@ router.post("/me/counselor/avatar", protect, requireRole("Counselor"), avatarUpl
 // Students list/edit (Counselor + Admin)
 router.get("/students", protect, requireRole("Counselor", "Admin"), getStudentsForCounselor);
 router.patch("/students/:userId", protect, requireRole("Counselor", "Admin"), updateStudentForCounselor);
-// Admin: Student lifecycle status (Pending/Active/Terminated)
+// Admin: Student lifecycle status (Pending/Active/Disabled)
 router.patch(
   "/students/:userId/status",
   protect,

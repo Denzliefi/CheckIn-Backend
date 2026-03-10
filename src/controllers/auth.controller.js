@@ -8,7 +8,10 @@ const {
   resetPasswordWithToken,
   sendPasswordResetOtp,
   verifyPasswordResetOtp,
-  validatePasswordResetToken
+  validatePasswordResetToken,
+  issueLoginOtpChallenge,
+  resendLoginOtp,
+  verifyLoginOtp,
 } = require("../services/auth.service");
 /* =======================
    Helpers (sanitize + normalize)
@@ -81,6 +84,23 @@ function signToken(id) {
   }
   const exp = process.env.JWT_EXPIRES_IN || "30d";
   return jwt.sign({ id }, secret, { expiresIn: exp });
+}
+
+function buildAuthUserPayload(user) {
+  return {
+    id: user._id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    fullName: user.fullName,
+    email: user.email,
+    username: user.username,
+    studentNumber: user.studentNumber,
+    course: user.course,
+    campus: user.campus || "",
+    role: user.role,
+    avatarUrl: user.avatarUrl || "",
+    status: String(user.status || "active").toLowerCase(),
+  };
 }
 
 /* =======================
@@ -210,31 +230,24 @@ async function login(req, res) {
         { email: emailOrUsername.toLowerCase() },
         { username: new RegExp(`^${emailOrUsername}$`, "i") },
       ],
-    }).select("+password");
+    }).select("+password +loginOtpHash +loginOtpExpires +loginOtpRequestedAt +loginOtpAttempts +loginOtpPendingId +loginOtpMethod");
 
     if (!user) return res.status(401).json({ message: "Invalid credentials." });
 
     const ok = await user.comparePassword(password);
     if (!ok) return res.status(401).json({ message: "Invalid credentials." });
 
-    const token = signToken(user._id);
+    const challenge = await issueLoginOtpChallenge(user, "password");
 
     return res.json({
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: user.fullName,
-        email: user.email,
-        username: user.username,
-        studentNumber: user.studentNumber,
-        course: user.course,
-        campus: user.campus || "",
-        role: user.role,
-        avatarUrl: user.avatarUrl || "",
-        status: String(user.status || "active").toLowerCase(),
-      },
+      otpRequired: true,
+      pendingToken: challenge.pendingToken,
+      resendIn: challenge.resendIn,
+      expiresIn: challenge.expiresIn,
+      email: user.email,
+      message: challenge.sent
+        ? "OTP sent to your email."
+        : "OTP already sent. Please use the existing code or wait before requesting another one.",
     });
   } catch (err) {
     console.error("LOGIN_ERROR:", err);
@@ -408,22 +421,16 @@ async function googleAuth(req, res) {
         user = await User.findByIdAndUpdate(user._id, updates, { new: true }).select("-password");
       }
 
-      const token = signToken(user._id);
+      const challenge = await issueLoginOtpChallenge(user, "google");
       return res.json({
-        token,
-        user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          fullName: user.fullName,
-          email: user.email,
-          username: user.username,
-          studentNumber: user.studentNumber,
-          course: user.course,
-          role: user.role,
-          avatarUrl: user.avatarUrl || "",
-          status: (user.status || "active").toLowerCase(),
-        },
+        otpRequired: true,
+        pendingToken: challenge.pendingToken,
+        resendIn: challenge.resendIn,
+        expiresIn: challenge.expiresIn,
+        email: user.email,
+        message: challenge.sent
+          ? "OTP sent to your email."
+          : "OTP already sent. Please use the existing code or wait before requesting another one.",
       });
     }
 
@@ -454,27 +461,76 @@ async function googleAuth(req, res) {
       status: "pending",
     });
 
-    const token = signToken(newUser._id);
+    const challenge = await issueLoginOtpChallenge(newUser, "google");
 
     return res.status(201).json({
-      token,
-      user: {
-        id: newUser._id,
-        firstName: newUser.firstName,
-        lastName: newUser.lastName,
-        fullName: newUser.fullName,
-        email: newUser.email,
-        username: newUser.username,
-        studentNumber: newUser.studentNumber,
-        course: newUser.course,
-        role: newUser.role,
-        avatarUrl: newUser.avatarUrl || "",
-        status: (newUser.status || "active").toLowerCase(),
-      },
+      otpRequired: true,
+      pendingToken: challenge.pendingToken,
+      resendIn: challenge.resendIn,
+      expiresIn: challenge.expiresIn,
+      email: newUser.email,
+      message: challenge.sent
+        ? "OTP sent to your email."
+        : "OTP already sent. Please use the existing code or wait before requesting another one.",
     });
   } catch (err) {
     console.error("GOOGLE_AUTH_ERROR:", err);
     return res.status(500).json({ message: "Google auth failed." });
+  }
+}
+
+/* =======================
+   VERIFY LOGIN OTP
+   POST /api/auth/login/verify-otp
+   Body: { pendingToken, otp }
+======================= */
+async function verifyLoginOtpCode(req, res) {
+  try {
+    const pendingToken = String(req.body.pendingToken ?? "").trim();
+    const otp = String(req.body.otp ?? "").trim();
+
+    if (!pendingToken || !otp) {
+      return res.status(400).json({ message: "Pending login token and OTP are required." });
+    }
+
+    const user = await verifyLoginOtp({ pendingToken, otp });
+    const token = signToken(user._id);
+
+    return res.json({
+      token,
+      user: buildAuthUserPayload(user),
+    });
+  } catch (err) {
+    console.error("VERIFY_LOGIN_OTP_ERROR:", err);
+    return res.status(400).json({ message: err.message || "Invalid OTP." });
+  }
+}
+
+/* =======================
+   RESEND LOGIN OTP
+   POST /api/auth/login/resend-otp
+   Body: { pendingToken }
+======================= */
+async function resendLoginOtpCode(req, res) {
+  try {
+    const pendingToken = String(req.body.pendingToken ?? "").trim();
+    if (!pendingToken) {
+      return res.status(400).json({ message: "Pending login token is required." });
+    }
+
+    const result = await resendLoginOtp(pendingToken);
+
+    return res.json({
+      message:
+        result && result.sent === false
+          ? "Please wait before requesting another code."
+          : "OTP sent. Please check your email.",
+      cooldownSeconds: result && result.cooldownSeconds ? result.cooldownSeconds : undefined,
+      expiresIn: result && result.expiresIn ? result.expiresIn : undefined,
+    });
+  } catch (err) {
+    console.error("RESEND_LOGIN_OTP_ERROR:", err);
+    return res.status(400).json({ message: err.message || "Unable to send OTP." });
   }
 }
 
@@ -623,6 +679,8 @@ module.exports = {
   createUser,
   googleAuth,
   checkAvailability,
+  verifyLoginOtpCode,
+  resendLoginOtpCode,
   forgotPassword,
   resetPassword,
   validateResetPasswordToken,

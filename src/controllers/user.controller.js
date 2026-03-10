@@ -39,7 +39,7 @@ exports.getMe = async (req, res, next) => {
       fullName: fullName || "",
       role: u.role || "",
       username: u.username || "",
-      status: String(u.status || "active").toLowerCase(),
+      status: normalizeStudentLifecycleStatus(u.status || "active"),
     });
   } catch (err) {
     next(err);
@@ -58,6 +58,11 @@ function isValidEmail(value) {
 }
 function isCounselorRole(role) {
   return /^counselor$/i.test(String(role || ""));
+}
+
+function normalizeStudentLifecycleStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  return status === "terminated" ? "disabled" : status;
 }
 
 function formatYYYYMM(d) {
@@ -102,7 +107,7 @@ exports.getStudentsForCounselor = async (req, res, next) => {
         studentId: u.studentNumber || "",
         course: u.course || "",
         campus: u.campus || "",
-        status: String(u.status || "active").toLowerCase(),
+        status: normalizeStudentLifecycleStatus(u.status || "active"),
         updatedAt: u.updatedAt || null,
         createdAt: created || null,
         createdMonth: formatYYYYMM(created),
@@ -217,7 +222,7 @@ exports.updateStudentForCounselor = async (req, res, next) => {
         studentId: saved.studentNumber || "",
         course: saved.course || "",
         campus: saved.campus || "",
-        status: String(saved.status || "active").toLowerCase(),
+        status: normalizeStudentLifecycleStatus(saved.status || "active"),
         updatedAt: saved.updatedAt || null,
         createdAt: created || null,
         createdMonth: formatYYYYMM(created),
@@ -236,12 +241,12 @@ exports.updateStudentForCounselor = async (req, res, next) => {
    PATCH /api/users/students/status/bulk
 ========================= */
 
-const ALLOWED_STUDENT_STATUSES = new Set(["pending", "active", "terminated"]);
+const ALLOWED_STUDENT_STATUSES = new Set(["pending", "active", "disabled", "terminated"]);
 
 exports.updateStudentStatusAdmin = async (req, res, next) => {
   try {
     const adminPassword = String(req.body?.adminPassword || "").trim();
-    const nextStatus = String(req.body?.status || "").trim().toLowerCase();
+    const nextStatus = normalizeStudentLifecycleStatus(req.body?.status || "");
 
     if (!adminPassword) {
       res.status(400);
@@ -249,7 +254,7 @@ exports.updateStudentStatusAdmin = async (req, res, next) => {
     }
     if (!ALLOWED_STUDENT_STATUSES.has(nextStatus)) {
       res.status(400);
-      throw new Error("Invalid status. Use pending, active, or terminated.");
+      throw new Error("Invalid status. Use pending, active, or disabled.");
     }
 
     // Verify admin password
@@ -280,7 +285,7 @@ exports.updateStudentStatusAdmin = async (req, res, next) => {
 
     return res.json({
       id: String(student._id),
-      status: String(student.status || "active").toLowerCase(),
+      status: normalizeStudentLifecycleStatus(student.status || "active"),
       updatedAt: (student.updatedAt ? new Date(student.updatedAt).toISOString() : new Date().toISOString()),
     });
   } catch (err) {
@@ -291,7 +296,7 @@ exports.updateStudentStatusAdmin = async (req, res, next) => {
 exports.bulkUpdateStudentStatusAdmin = async (req, res, next) => {
   try {
     const adminPassword = String(req.body?.adminPassword || "").trim();
-    const nextStatus = String(req.body?.status || "").trim().toLowerCase();
+    const nextStatus = normalizeStudentLifecycleStatus(req.body?.status || "");
     const userIdsRaw = Array.isArray(req.body?.userIds)
       ? req.body.userIds
       : Array.isArray(req.body?.studentIds)
@@ -308,7 +313,7 @@ exports.bulkUpdateStudentStatusAdmin = async (req, res, next) => {
     }
     if (!ALLOWED_STUDENT_STATUSES.has(nextStatus)) {
       res.status(400);
-      throw new Error("Invalid status. Use pending, active, or terminated.");
+      throw new Error("Invalid status. Use pending, active, or disabled.");
     }
     if (!userIds.length) {
       res.status(400);
@@ -708,7 +713,7 @@ exports.updateMyCounselorAvatar = async (req, res, next) => {
 /* =========================
    ADMIN: ANALYTICS (AssignmentsReassignment)
    GET /api/users/admin/analytics
-   - Student lifecycle counts: pending / active / terminated
+   - Student lifecycle counts: pending / active / disabled
    - Active students: status === "active"
    - Counselors: role === "counselor" (case-insensitive), plus active counselors
    - Requests status counts from CounselingRequest: pending / approved / cancelled / disapproved
@@ -722,7 +727,7 @@ exports.getAdminAnalytics = async (req, res, next) => {
     const [
       studentsPending,
       studentsActive,
-      studentsTerminated,
+      studentsDisabled,
       studentsTotal,
       counselorsTotal,
       counselorsActive,
@@ -731,7 +736,7 @@ exports.getAdminAnalytics = async (req, res, next) => {
     ] = await Promise.all([
       User.countDocuments({ ...studentRole, status: "pending" }),
       User.countDocuments({ ...studentRole, status: "active" }),
-      User.countDocuments({ ...studentRole, status: "terminated" }),
+      User.countDocuments({ ...studentRole, status: { $in: ["disabled", "terminated"] } }),
       User.countDocuments(studentRole),
       User.countDocuments(counselorRole),
       User.countDocuments({ ...counselorRole, status: "active" }),
@@ -772,8 +777,19 @@ exports.getAdminAnalytics = async (req, res, next) => {
     const requestsApproved = byStatus.get("approved") || 0;
     const requestsCancelled = byStatus.get("cancelled") || 0;
     const requestsDisapproved = byStatus.get("disapproved") || 0;
+    const requestsCompleted = byStatus.get("completed") || 0;
+    const requestsNoShows =
+      (byStatus.get("no show") || 0) +
+      (byStatus.get("no-show") || 0) +
+      (byStatus.get("noshow") || 0);
 
-    const requestsTotal = requestsPending + requestsApproved + requestsCancelled + requestsDisapproved;
+    const requestsTotal =
+      requestsPending +
+      requestsApproved +
+      requestsCancelled +
+      requestsDisapproved +
+      requestsCompleted +
+      requestsNoShows;
 
     const denom = Math.max(1, Number(studentsTotal || 0));
     const studentsByCourse = (courseAgg || []).map((c) => {
@@ -790,7 +806,8 @@ exports.getAdminAnalytics = async (req, res, next) => {
       students: {
         pending: studentsPending,
         active: studentsActive,
-        terminated: studentsTerminated,
+        disabled: studentsDisabled,
+        terminated: studentsDisabled,
         total: studentsTotal,
       },
       activeStudents: studentsActive,
@@ -802,6 +819,8 @@ exports.getAdminAnalytics = async (req, res, next) => {
         approved: requestsApproved,
         cancelled: requestsCancelled,
         disapproved: requestsDisapproved,
+        completed: requestsCompleted,
+        noShows: requestsNoShows,
         total: requestsTotal,
       },
 
@@ -810,13 +829,16 @@ exports.getAdminAnalytics = async (req, res, next) => {
       // ✅ UI keys (AssignmentsReassignment / AdminOverviewAnalytics)
       studentsTotal,
       studentsActive,
+      studentsDisabled,
       counselorsTotal,
+      studentsTerminated: studentsDisabled,
       requestsPending,
       requestsApproved,
       requestsCancelled,
       requestsDone: requestsDisapproved, // UI label is "Disapproved"
       requestsDisapproved,
-      requestsNoShows: 0,
+      requestsCompleted,
+      requestsNoShows,
     });
   } catch (err) {
     next(err);

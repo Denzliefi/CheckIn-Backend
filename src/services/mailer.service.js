@@ -205,6 +205,44 @@ async function sendPasswordResetOtpEmail({ to, name = "", otp, ttlMinutes = 10 }
   return sendMail({ to, subject, text, html });
 }
 
+async function sendLoginOtpEmail({ to, name = "", otp, ttlMinutes = 5 }) {
+  const subject = "Your CheckIn login verification code";
+  const safeName = String(name || "").trim();
+
+  const text =
+    `Hi${safeName ? " " + safeName : ""},
+
+` +
+    `Your one-time login code is: ${otp}
+` +
+    `This code expires in ${ttlMinutes} minute(s).
+
+` +
+    `If you did not try to log in, you can ignore this email.
+`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+      <h2 style="margin: 0 0 12px;">Login Verification Code</h2>
+      <p style="margin: 0 0 12px;">
+        Hi${safeName ? " <b>" + escapeHtml(safeName) + "</b>" : ""},<br/>
+        Use the one-time code below to finish logging in to CheckIn:
+      </p>
+      <div style="display:inline-block; padding: 10px 14px; border-radius: 10px; background:#F4FFE7; border:1px solid rgba(0,0,0,.12); font-size: 20px; letter-spacing: 2px; font-weight: 800;">
+        ${otp}
+      </div>
+      <p style="margin: 12px 0 0; font-size: 13px; color: rgba(0,0,0,.65);">
+        This code expires in ${ttlMinutes} minute(s).
+      </p>
+      <p style="margin: 12px 0 0; font-size: 12px; color: rgba(0,0,0,.55);">
+        If you did not try to log in, you can ignore this email.
+      </p>
+    </div>
+  `;
+
+  return sendMail({ to, subject, text, html });
+}
+
 /**
  * Meet Request status notifications (Approved / Rescheduled / Disapproved)
  * Reusable for other email-based notifications.
@@ -346,6 +384,7 @@ module.exports = {
   sendMail,
   sendPasswordResetEmail,
   sendPasswordResetOtpEmail,
+  sendLoginOtpEmail,
   sendMeetRequestStatusEmail,
   sendMeetRequestDetailsUpdatedEmail,
 };
