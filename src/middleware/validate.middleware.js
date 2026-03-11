@@ -1,9 +1,5 @@
-console.log("✅ LOADED validate.middleware.js from:", __filename);
-
 function validate(requiredFields = []) {
   return (req, res, next) => {
-    console.log("✅ validate called. req.body is:", req.body);
-
     const body = req.body ?? {};
     const errors = [];
 
