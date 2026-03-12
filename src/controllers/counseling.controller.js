@@ -781,6 +781,11 @@ exports.rescheduleOwnMeetRequest = async (req, res) => {
       doc.meetingLink = "";
     }
 
+    // Student reschedule invalidates any previously shared meeting link/location.
+    // The counselor will provide an updated link/location upon approval.
+    doc.meetingLink = "";
+    doc.location = "";
+
     // Student-initiated reschedules must go back to Pending so the counselor can review them.
     // The request only becomes Rescheduled after counselor/admin approval.
     doc.status = "Pending";
@@ -889,6 +894,9 @@ exports.disapproveRequest = async (req, res) => {
 
     doc.status = "Disapproved";
     doc.disapprovalReason = reason ? String(reason).trim() : "Disapproved.";
+    // Clear meeting details on disapproval so old links/locations cannot leak into emails or UI.
+    doc.meetingLink = "";
+    doc.location = "";
     await doc.save();
 
     
