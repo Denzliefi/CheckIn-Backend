@@ -311,9 +311,9 @@ async function sendMeetRequestStatusEmail({
     lines.push("", line("Previous schedule", `${prev}${prevMode}`));
   }
 
-  if (rescheduleNote) lines.push(line("Counselor reason", rescheduleNote));
+  if (statusLower === "rescheduled" && rescheduleNote) lines.push(line("Counselor reason", rescheduleNote));
 
-  if (isOnline) {
+  if (isOnline && (statusLower === "approved" || statusLower === "rescheduled")) {
     lines.push(line("Meeting link", resolvedMeetingLink || "To be provided"));
   }
 
@@ -322,7 +322,7 @@ async function sendMeetRequestStatusEmail({
   }
 
   if (statusLower === "disapproved") {
-    lines.push("", line("Counselor reason", disapprovalReason || "—"));
+    lines.push("", line("Disapproval reason", disapprovalReason || "—"));
   }
 
   if (counselorCampus || studentCampus) {
@@ -361,10 +361,10 @@ async function sendMeetRequestStatusEmail({
               )}${rescheduledFrom.sessionType ? ` (${escapeHtml(rescheduledFrom.sessionType)})` : ""}</p>`
             : ""
         }
-        ${rescheduleNote ? `<p style="margin:0 0 6px;"><b>Counselor reason:</b> ${escapeHtml(rescheduleNote)}</p>` : ""}
-        ${isOnline ? `<p style="margin:0 0 6px;"><b>Meeting link:</b> ${resolvedMeetingLink ? `<a href="${escapeHtml(resolvedMeetingLink)}">${escapeHtml(resolvedMeetingLink)}</a>` : "To be provided"}</p>` : ""}
+        ${(statusLower === "rescheduled" && rescheduleNote) ? `<p style="margin:0 0 6px;"><b>Counselor reason:</b> ${escapeHtml(rescheduleNote)}</p>` : ""}
+        ${(isOnline && (statusLower === "approved" || statusLower === "rescheduled")) ? `<p style="margin:0 0 6px;"><b>Meeting link:</b> ${resolvedMeetingLink ? `<a href="${escapeHtml(resolvedMeetingLink)}">${escapeHtml(resolvedMeetingLink)}</a>` : "To be provided"}</p>` : ""}
         ${isInPerson ? `<p style="margin:0 0 6px;"><b>Location:</b> ${escapeHtml(resolvedLocation)}</p>` : ""}
-        ${statusLower === "disapproved" ? `<p style="margin:10px 0 0;"><b>Counselor reason:</b> ${escapeHtml(disapprovalReason || "—")}</p>` : ""}
+        ${statusLower === "disapproved" ? `<p style="margin:10px 0 0;"><b>Disapproval reason:</b> ${escapeHtml(disapprovalReason || "—")}</p>` : ""}
       </div>
 
       <p style="margin:12px 0 0;">Thank you,<br/><b>${escapeHtml(counselor)}</b><br/>Guidance &amp; Counseling Office</p>
